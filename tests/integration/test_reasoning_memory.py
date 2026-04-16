@@ -372,6 +372,45 @@ class TestReasoningMemorySearch:
         assert isinstance(similar, list)
 
     @pytest.mark.asyncio
+    async def test_search_similar_traces_falls_back_to_text_match(self, memory_client, session_id):
+        """Text fallback should recover useful traces when vector similarity misses."""
+        trace = await memory_client.reasoning.start_trace(
+            session_id,
+            task="Validate shell-first memory workflow",
+            generate_embedding=True,
+        )
+        step = await memory_client.reasoning.add_step(
+            trace.id,
+            thought="Check whether durable memory guidance is visible.",
+            action="inspect shell memory context",
+            observation="Confirmed durable fact recall appears in get-context for shell memory.",
+            generate_embedding=False,
+        )
+        await memory_client.reasoning.record_tool_call(
+            step.id,
+            tool_name="rg",
+            arguments={"pattern": "get_context"},
+            result="long-term context composes facts",
+            status=ToolCallStatus.SUCCESS,
+        )
+        await memory_client.reasoning.complete_trace(
+            trace.id,
+            outcome="Shell-first durable coding-agent memory workflow works.",
+            success=True,
+        )
+
+        similar = await memory_client.reasoning.get_similar_traces(
+            "How should I handle durable coding-agent memory from the shell?",
+            limit=3,
+            threshold=0.99,
+        )
+
+        assert any(item.id == trace.id for item in similar)
+        matched = next(item for item in similar if item.id == trace.id)
+        assert matched.metadata["match_type"] == "text"
+        assert matched.metadata["text_overlap"] >= 1
+
+    @pytest.mark.asyncio
     async def test_get_tool_statistics(self, memory_client, session_id):
         """Test getting tool usage statistics."""
         # Create trace with tool calls

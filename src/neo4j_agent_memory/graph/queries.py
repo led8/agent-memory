@@ -165,14 +165,13 @@ ORDER BY score DESC
 
 DELETE_MESSAGE = """
 MATCH (m:Message {id: $id})
-OPTIONAL MATCH (m)-[r:MENTIONS]->()
-DELETE r, m
+DETACH DELETE m
 RETURN count(m) > 0 AS deleted
 """
 
 DELETE_MESSAGE_NO_CASCADE = """
 MATCH (m:Message {id: $id})
-DELETE m
+DETACH DELETE m
 RETURN count(m) > 0 AS deleted
 """
 
@@ -246,7 +245,8 @@ RETURN e
 
 GET_ENTITY_BY_NAME = """
 MATCH (e:Entity)
-WHERE e.name = $name OR e.canonical_name = $name OR $name IN COALESCE(e.aliases, [])
+WHERE e.merged_into IS NULL
+  AND (e.name = $name OR e.canonical_name = $name OR $name IN COALESCE(e.aliases, []))
 RETURN e
 LIMIT 1
 """
@@ -254,16 +254,36 @@ LIMIT 1
 SEARCH_ENTITIES_BY_EMBEDDING = """
 CALL db.index.vector.queryNodes('entity_embedding_idx', $limit, $embedding)
 YIELD node, score
-WHERE score >= $threshold
+WHERE score >= $threshold AND node.merged_into IS NULL
 RETURN node AS e, score
 ORDER BY score DESC
 """
 
 SEARCH_ENTITIES_BY_TYPE = """
 MATCH (e:Entity {type: $type})
+WHERE e.merged_into IS NULL
 RETURN e
 ORDER BY e.created_at DESC
 LIMIT $limit
+"""
+
+LIST_RECENT_ENTITIES = """
+MATCH (e:Entity)
+WHERE e.merged_into IS NULL
+RETURN e
+ORDER BY coalesce(e.updated_at, e.created_at) DESC
+LIMIT $limit
+"""
+
+UPDATE_ENTITY = """
+MATCH (e:Entity {id: $id})
+SET e.name = $name,
+    e.canonical_name = $canonical_name,
+    e.description = $description,
+    e.aliases = $aliases,
+    e.metadata = $metadata,
+    e.updated_at = datetime()
+RETURN e
 """
 
 UPDATE_ENTITY_EMBEDDING = """
@@ -316,6 +336,33 @@ ORDER BY p.confidence DESC, p.created_at DESC
 LIMIT $limit
 """
 
+LIST_RECENT_PREFERENCES = """
+MATCH (p:Preference)
+RETURN p
+ORDER BY coalesce(p.updated_at, p.created_at) DESC
+LIMIT $limit
+"""
+
+UPDATE_PREFERENCE_METADATA = """
+MATCH (p:Preference {id: $id})
+SET p.metadata = $metadata,
+    p.updated_at = datetime()
+RETURN p
+"""
+
+LINK_PREFERENCE_SUPERSEDED_BY = """
+MATCH (old:Preference {id: $old_id})
+MATCH (new:Preference {id: $new_id})
+MERGE (old)-[r:SUPERSEDED_BY]->(new)
+ON CREATE SET
+    r.created_at = datetime(),
+    r.reason = $reason
+ON MATCH SET
+    r.updated_at = datetime(),
+    r.reason = coalesce($reason, r.reason)
+RETURN r
+"""
+
 CREATE_FACT = """
 CREATE (f:Fact {
     id: $id,
@@ -330,6 +377,26 @@ CREATE (f:Fact {
     metadata: $metadata
 })
 RETURN f
+"""
+
+UPDATE_FACT_METADATA = """
+MATCH (f:Fact {id: $id})
+SET f.metadata = $metadata,
+    f.updated_at = datetime()
+RETURN f
+"""
+
+LINK_FACT_SUPERSEDED_BY = """
+MATCH (old:Fact {id: $old_id})
+MATCH (new:Fact {id: $new_id})
+MERGE (old)-[r:SUPERSEDED_BY]->(new)
+ON CREATE SET
+    r.created_at = datetime(),
+    r.reason = $reason
+ON MATCH SET
+    r.updated_at = datetime(),
+    r.reason = coalesce($reason, r.reason)
+RETURN r
 """
 
 CREATE_ENTITY_RELATIONSHIP = """
@@ -354,12 +421,36 @@ ORDER BY f.confidence DESC, f.created_at DESC
 LIMIT $limit
 """
 
+LIST_RECENT_FACTS = """
+MATCH (f:Fact)
+RETURN f
+ORDER BY coalesce(f.updated_at, f.created_at) DESC
+LIMIT $limit
+"""
+
 SEARCH_FACTS_BY_EMBEDDING = """
 CALL db.index.vector.queryNodes('fact_embedding_idx', $limit, $embedding)
 YIELD node, score
 WHERE score >= $threshold
 RETURN node AS f, score
 ORDER BY score DESC
+"""
+
+SEARCH_FACTS_BY_TEXT = """
+WITH $terms AS terms
+MATCH (f:Fact)
+WITH f, [
+    term IN terms
+    WHERE size(term) >= 4 AND (
+        toLower(f.subject) CONTAINS term OR
+        toLower(f.predicate) CONTAINS term OR
+        toLower(f.object) CONTAINS term
+    )
+] AS matches
+WHERE size(matches) > 0
+RETURN f, size(matches) AS overlap
+ORDER BY overlap DESC, f.created_at DESC
+LIMIT $limit
 """
 
 GET_ENTITY_RELATIONSHIPS = """
@@ -558,13 +649,52 @@ RETURN node AS rt, score
 ORDER BY score DESC
 """
 
+SEARCH_TRACES_BY_TEXT = """
+WITH $terms AS terms
+MATCH (rt:ReasoningTrace)
+OPTIONAL MATCH (rt)-[:HAS_STEP]->(rs:ReasoningStep)
+OPTIONAL MATCH (rs)-[:USES_TOOL]->(tc:ToolCall)
+WITH rt, collect(DISTINCT rs) AS steps, collect(DISTINCT tc) AS tool_calls, terms
+WITH rt, [
+    term IN terms
+    WHERE size(term) >= 4 AND (
+        toLower(coalesce(rt.task, "")) CONTAINS term OR
+        toLower(coalesce(rt.outcome, "")) CONTAINS term OR
+        any(step IN steps WHERE
+            toLower(coalesce(step.thought, "")) CONTAINS term OR
+            toLower(coalesce(step.action, "")) CONTAINS term OR
+            toLower(coalesce(step.observation, "")) CONTAINS term
+        ) OR
+        any(tool_call IN tool_calls WHERE
+            toLower(coalesce(tool_call.tool_name, "")) CONTAINS term OR
+            toLower(coalesce(tool_call.result, "")) CONTAINS term
+        )
+    )
+] AS matches
+WHERE size(matches) > 0
+  AND ($success_only = false OR rt.success = true)
+RETURN rt, size(matches) AS overlap
+ORDER BY overlap DESC, rt.started_at DESC
+LIMIT $limit
+"""
+
 GET_TRACE_WITH_STEPS = """
 MATCH (rt:ReasoningTrace {id: $id})
 OPTIONAL MATCH (rt)-[:HAS_STEP]->(rs:ReasoningStep)
 OPTIONAL MATCH (rs)-[:USES_TOOL]->(tc:ToolCall)
 RETURN rt,
-       collect(DISTINCT rs) AS steps,
-       collect(DISTINCT tc) AS tool_calls
+       collect(
+           DISTINCT CASE
+               WHEN rs IS NULL THEN NULL
+               ELSE rs{.*}
+           END
+       ) AS steps,
+       collect(
+           DISTINCT CASE
+               WHEN tc IS NULL THEN NULL
+               ELSE tc{.*, step_id: rs.id}
+           END
+       ) AS tool_calls
 """
 
 LIST_TRACES = """
@@ -930,6 +1060,86 @@ CALL (source, target) {
     MERGE (m)-[:MENTIONS]->(target)
     RETURN count(*) AS mentionsTransferred
 }
+// Transfer outgoing RELATED_TO relationships
+CALL (source, target) {
+    MATCH (source)-[r:RELATED_TO]->(other:Entity)
+    WHERE other <> target
+    MERGE (target)-[new_r:RELATED_TO {type: coalesce(r.type, r.relation_type, 'RELATED_TO')}]->(other)
+    ON CREATE SET
+        new_r.id = coalesce(r.id, randomUUID()),
+        new_r.description = r.description,
+        new_r.confidence = r.confidence,
+        new_r.valid_from = r.valid_from,
+        new_r.valid_until = r.valid_until,
+        new_r.created_at = coalesce(r.created_at, datetime())
+    ON MATCH SET
+        new_r.description = coalesce(new_r.description, r.description),
+        new_r.confidence = CASE
+            WHEN coalesce(r.confidence, 0.0) > coalesce(new_r.confidence, 0.0) THEN r.confidence
+            ELSE new_r.confidence
+        END,
+        new_r.valid_from = coalesce(new_r.valid_from, r.valid_from),
+        new_r.valid_until = coalesce(new_r.valid_until, r.valid_until),
+        new_r.updated_at = datetime()
+    DELETE r
+    RETURN count(*) AS outgoingRelationshipsTransferred
+}
+// Transfer incoming RELATED_TO relationships
+CALL (source, target) {
+    MATCH (other:Entity)-[r:RELATED_TO]->(source)
+    WHERE other <> target
+    MERGE (other)-[new_r:RELATED_TO {type: coalesce(r.type, r.relation_type, 'RELATED_TO')}]->(target)
+    ON CREATE SET
+        new_r.id = coalesce(r.id, randomUUID()),
+        new_r.description = r.description,
+        new_r.confidence = r.confidence,
+        new_r.valid_from = r.valid_from,
+        new_r.valid_until = r.valid_until,
+        new_r.created_at = coalesce(r.created_at, datetime())
+    ON MATCH SET
+        new_r.description = coalesce(new_r.description, r.description),
+        new_r.confidence = CASE
+            WHEN coalesce(r.confidence, 0.0) > coalesce(new_r.confidence, 0.0) THEN r.confidence
+            ELSE new_r.confidence
+        END,
+        new_r.valid_from = coalesce(new_r.valid_from, r.valid_from),
+        new_r.valid_until = coalesce(new_r.valid_until, r.valid_until),
+        new_r.updated_at = datetime()
+    DELETE r
+    RETURN count(*) AS incomingRelationshipsTransferred
+}
+// Transfer ABOUT relationships from preferences
+CALL (source, target) {
+    MATCH (p:Preference)-[r:ABOUT]->(source)
+    WHERE NOT (p)-[:ABOUT]->(target)
+    MERGE (p)-[:ABOUT]->(target)
+    DELETE r
+    RETURN count(*) AS aboutTransferred
+}
+// Transfer EXTRACTED_FROM relationships
+CALL (source, target) {
+    MATCH (source)-[r:EXTRACTED_FROM]->(m:Message)
+    WHERE NOT (target)-[:EXTRACTED_FROM]->(m)
+    MERGE (target)-[new_r:EXTRACTED_FROM]->(m)
+    ON CREATE SET
+        new_r.confidence = r.confidence,
+        new_r.start_pos = r.start_pos,
+        new_r.end_pos = r.end_pos,
+        new_r.context = r.context
+    DELETE r
+    RETURN count(*) AS extractedFromTransferred
+}
+// Transfer EXTRACTED_BY relationships
+CALL (source, target) {
+    MATCH (source)-[r:EXTRACTED_BY]->(ex:Extractor)
+    WHERE NOT (target)-[:EXTRACTED_BY]->(ex)
+    MERGE (target)-[new_r:EXTRACTED_BY]->(ex)
+    ON CREATE SET
+        new_r.confidence = r.confidence,
+        new_r.extraction_time_ms = r.extraction_time_ms
+    DELETE r
+    RETURN count(*) AS extractedByTransferred
+}
 // Transfer SAME_AS relationships to target using CALL subquery
 CALL (source, target) {
     MATCH (source)-[r:SAME_AS]-(other:Entity)
@@ -943,7 +1153,8 @@ CALL (source, target) {
 }
 // Mark source as merged
 SET source.merged_into = target.id,
-    source.merged_at = datetime()
+    source.merged_at = datetime(),
+    source.updated_at = datetime()
 // Add source name as alias on target
 SET target.aliases = CASE
     WHEN target.aliases IS NULL THEN [source.name]

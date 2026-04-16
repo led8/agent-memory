@@ -3,6 +3,7 @@
 import pytest
 
 from neo4j_agent_memory.memory.long_term import EntityType
+from neo4j_agent_memory.memory.reasoning import ToolCallStatus
 from neo4j_agent_memory.memory.short_term import MessageRole
 
 
@@ -232,6 +233,44 @@ class TestMemoryClientGetContext:
         assert len(context) > 0
 
     @pytest.mark.asyncio
+    async def test_get_context_includes_reasoning_details(self, memory_client, session_id):
+        """Reasoning context should surface similar past tasks with useful detail."""
+        trace = await memory_client.reasoning.start_trace(
+            session_id,
+            "Validate shell-first memory workflow",
+            generate_embedding=True,
+        )
+        step = await memory_client.reasoning.add_step(
+            trace.id,
+            thought="Check whether durable memory guidance is visible.",
+            action="inspect shell memory context",
+            observation="Confirmed durable fact recall appears in get-context for shell memory.",
+            generate_embedding=False,
+        )
+        await memory_client.reasoning.record_tool_call(
+            step.id,
+            tool_name="rg",
+            arguments={"pattern": "get_context"},
+            result="long-term context composes facts",
+            status=ToolCallStatus.SUCCESS,
+        )
+        await memory_client.reasoning.complete_trace(
+            trace.id,
+            outcome="Shell-first durable coding-agent memory workflow works.",
+            success=True,
+        )
+
+        context = await memory_client.get_context(
+            "How should I handle durable coding-agent memory from the shell?",
+            session_id=session_id,
+        )
+
+        assert "## Similar Past Tasks" in context
+        assert "**Task**: Validate shell-first memory workflow" in context
+        assert "- Key action: inspect shell memory context" in context
+        assert "- Tools: rg" in context
+
+    @pytest.mark.asyncio
     async def test_get_context_with_limit(self, memory_client, session_id):
         """Test get_context respects limits."""
         # Add many messages
@@ -321,7 +360,17 @@ class TestMemoryClientCrossMemoryOperations:
 
     @pytest.mark.asyncio
     async def test_message_with_entity_extraction_creates_entities(self, memory_client, session_id):
-        """Test that entity extraction from messages creates long-term entities."""
+        """Test that extraction links messages to both new and existing entities."""
+        await memory_client.long_term.add_entity(
+            "Google",
+            EntityType.ORGANIZATION,
+            resolve=False,
+            generate_embedding=False,
+            deduplicate=False,
+            enrich=False,
+            geocode=False,
+        )
+
         # Add message with entity extraction
         await memory_client.short_term.add_message(
             session_id,
@@ -331,9 +380,17 @@ class TestMemoryClientCrossMemoryOperations:
             generate_embedding=False,
         )
 
-        # The mock extractor should have created entities
-        # Check if entities were created (depends on mock implementation)
-        # This test verifies the cross-memory integration works
+        rows = await memory_client._client.execute_read(
+            """
+            MATCH (c:Conversation {session_id: $session_id})-[:HAS_MESSAGE]->(m:Message)
+            MATCH (m)-[:MENTIONS]->(e:Entity)
+            RETURN collect(e.name) AS entity_names
+            """,
+            {"session_id": session_id},
+        )
+
+        entity_names = set(rows[0]["entity_names"])
+        assert {"John", "Smith", "Google"} <= entity_names
 
     @pytest.mark.asyncio
     async def test_reasoning_trace_references_conversation(self, memory_client, session_id):

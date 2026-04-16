@@ -1,0 +1,66 @@
+# Task: Agent Memory Integration Spike
+
+## Checklist
+- [x] validate implementation direction with the user
+- [x] create approved backlog item
+- [x] inspect core Python integration points in `agent-memory`
+- [x] confirm local setup path for Neo4j + `uv`
+- [x] choose phase-1 extraction path (`GLiNER`)
+- [x] implement a minimal `MemoryClient` smoke test
+- [x] validate short-term, long-term, and reasoning memory flow
+- [x] install and validate local `GLiNER`
+- [x] wire `GLiNER` into the smoke test
+- [x] define the initial coding-agent memory mapping
+- [x] decide what to carry over from `voidm`
+- [x] decide whether a new `agent-memory` skill is warranted
+- [x] run targeted verification for the `GLiNER` integration slice
+- [x] implement a thin coding-agent workflow helper over `MemoryClient`
+- [x] add unit coverage for the coding-agent helper
+- [x] update the Python API README entry to mention the coding-agent helper
+- [x] add a dedicated `examples/coding_agent_workflow.py` example
+- [x] run the dedicated coding-agent workflow example end-to-end
+- [x] encode Policy V1.1 candidate review flow in `CodingAgentMemory`
+- [x] add unit coverage for candidate proposal and explicit persistence
+- [x] update the workflow example to demonstrate candidate review
+- [x] update the usage model document with Policy V1.1
+- [x] run targeted verification for the candidate review flow
+- [x] make long-term fact/preference writes idempotent within the durable scope
+- [x] add unit coverage for long-term write deduplication
+- [x] update the workflow example and usage model with the idempotence rule
+- [x] run targeted verification for long-term write idempotence
+- [x] add a real Neo4j integration test for CodingAgentMemory long-term idempotence
+- [x] run targeted integration verification for CodingAgentMemory idempotence
+- [x] implement long-term supersession for conflicting facts/preferences
+- [x] add unit coverage for long-term supersession
+- [x] add a real Neo4j integration test for long-term supersession
+- [x] ensure default long-term retrieval hides superseded entries
+- [x] run targeted verification for long-term supersession
+- [x] enforce entity discipline in CodingAgentMemory (exact reuse first, then store dedup/resolution)
+- [x] add unit coverage for entity reuse/default dedup behavior
+- [x] add a real Neo4j integration test for entity reuse
+- [x] update the usage model with the entity handling rule
+- [x] run targeted verification for entity discipline
+
+## Notes
+- Start from Python API, not MCP.
+- Keep `voidm` in parallel until the new workflow is stable.
+- LLM extraction fallback is deferred but should remain compatible with the design.
+- Local smoke test path currently uses:
+- real Neo4j via `docker-compose.test.yml`
+- `uv run`
+- custom local hashed embedder in `examples/coding_agent_smoke_test.py`
+- local `GLiNER` extraction with LLM fallback disabled
+- Fixed an upstream short-term extraction bug: when Neo4j merged an existing entity, the code linked the message with the generated candidate id instead of the persisted entity id, which dropped `MENTIONS` relationships for existing entities.
+- Initial usage contract written in `.spark_utils/data/20260410_coding_agent_usage_model.md`.
+- Current position: keep `voidm` in parallel, do not create a new `agent-memory` skill yet, and use one `session_id` per coding task.
+- Added `CodingAgentMemory` plus `build_coding_session_id` as a task-scoped helper for coding-agent workflows.
+- Dedicated coding-agent example should remain more realistic than the smoke test, while the smoke test stays minimal and infrastructure-focused.
+- Policy V1.1 keeps long-term memory in propose-only mode: the agent can surface structured candidates, but durable writes remain explicit.
+- Next robustness goal: facts and preferences should not duplicate when the same reviewed candidate is replayed in the same repo/scope.
+- Integration proof should live at the wrapper level, not only in unit tests, so the contract remains stable against future graph/query changes.
+- Targeted real-Neo4j verification now passes for reviewed fact/preference replay through `CodingAgentMemory`.
+- Next robustness goal: when a new durable fact or preference conflicts with an older active one in the same scope, keep history but mark the older entry as superseded.
+- Targeted real-Neo4j verification now passes for long-term supersession, and default preference/fact reads hide superseded entries unless explicitly requested.
+- Next robustness goal: entities should reuse exact same-type matches first, then rely on the store's resolution/dedup logic instead of accumulating obvious duplicates.
+- Targeted real-Neo4j verification now passes for entity reuse through `CodingAgentMemory`, with exact same-type matches reused before deeper resolution/deduplication.
+- Follow-on planning now lives in the sub-backlog `20260410_agent-memory_first_skill_readiness_checkpoint.md`.

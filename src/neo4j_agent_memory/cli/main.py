@@ -1,4 +1,4 @@
-"""CLI commands for Neo4j Agent Memory entity extraction.
+"""CLI commands for Neo4j Agent Memory.
 
 Usage:
     neo4j-agent-memory extract "John works at Acme Corp"
@@ -6,6 +6,7 @@ Usage:
     neo4j-agent-memory extract --file document.txt --format json
     neo4j-agent-memory schemas list
     neo4j-agent-memory stats
+    neo4j-agent-memory memory session-id --repo agent-memory --task "debug extraction"
 """
 
 from __future__ import annotations
@@ -22,6 +23,8 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
+from neo4j_agent_memory.cli.memory_ops import MemoryCliConnection, MemoryCliService
+from neo4j_agent_memory.memory.reasoning import ToolCallStatus
 from neo4j_agent_memory.extraction import (
     ExtractionResult,
     ExtractorBuilder,
@@ -51,6 +54,39 @@ def run_async(coro):
             return pool.submit(asyncio.run, coro).result()
     else:
         return asyncio.run(coro)
+
+
+def echo_json(payload: Any) -> None:
+    """Emit a JSON payload to stdout."""
+    click.echo(json.dumps(payload, indent=2, default=str))
+
+
+def parse_json_option(raw: str | None, option_name: str) -> Any | None:
+    """Parse a JSON CLI option."""
+    if raw is None:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise click.BadParameter(f"{option_name} must be valid JSON: {exc}") from exc
+
+
+def run_memory_operation(
+    connection: MemoryCliConnection,
+    operation,
+) -> Any:
+    """Run one memory CLI operation with a connected service."""
+
+    async def runner():
+        async with MemoryCliService(connection) as service:
+            return await operation(service)
+
+    try:
+        return run_async(runner())
+    except click.ClickException:
+        raise
+    except Exception as exc:  # pragma: no cover - surfaced as CLI error
+        raise click.ClickException(str(exc)) from exc
 
 
 def format_entities_table(result: ExtractionResult) -> Table:
@@ -675,6 +711,690 @@ def stats(format: str, uri: str, user: str, password: str | None):
                 )
 
             console.print(table)
+
+
+@cli.group()
+@click.option(
+    "--uri",
+    envvar="NEO4J_URI",
+    default="bolt://localhost:7687",
+    help="Neo4j URI.",
+)
+@click.option(
+    "--user",
+    envvar=["NEO4J_USER", "NEO4J_USERNAME"],
+    default="neo4j",
+    help="Neo4j username.",
+)
+@click.option(
+    "--password",
+    envvar="NEO4J_PASSWORD",
+    help="Neo4j password.",
+)
+@click.option(
+    "--database",
+    envvar="NEO4J_DATABASE",
+    default="neo4j",
+    help="Neo4j database name.",
+)
+@click.option(
+    "--local-embedder",
+    is_flag=True,
+    default=False,
+    help="Use the deterministic local hashed embedder for local workflows.",
+)
+@click.pass_context
+def memory(
+    ctx: click.Context,
+    uri: str,
+    user: str,
+    password: str | None,
+    database: str,
+    local_embedder: bool,
+):
+    """Operate the three memory layers through a shell-friendly CLI."""
+    ctx.obj = MemoryCliConnection(
+        uri=uri,
+        user=user,
+        password=password,
+        database=database,
+        local_embedder=local_embedder,
+    )
+
+
+@memory.command("session-id")
+@click.option("--repo", required=True, help="Repository slug.")
+@click.option("--task", required=True, help="Task label.")
+@click.option("--run-id", default=None, help="Optional explicit run suffix.")
+@click.pass_obj
+def memory_session_id(connection: MemoryCliConnection, repo: str, task: str, run_id: str | None):
+    """Build a task-scoped coding session identifier."""
+    service = MemoryCliService(connection)
+    echo_json(service.build_session_id(repo=repo, task=task, run_id=run_id))
+
+
+@memory.command("add-message")
+@click.argument("text")
+@click.option("--session-id", required=True, help="Target session ID.")
+@click.option("--role", type=click.Choice(["user", "assistant", "system"]), required=True)
+@click.option("--metadata-json", default=None, help="Optional JSON metadata.")
+@click.option("--extract-entities/--no-extract-entities", default=False, help="Run entity extraction.")
+@click.option(
+    "--extract-relations/--no-extract-relations",
+    default=False,
+    help="Run relation extraction when extraction is enabled.",
+)
+@click.option("--generate-embedding/--no-generate-embedding", default=True, help="Generate embeddings.")
+@click.pass_obj
+def memory_add_message(
+    connection: MemoryCliConnection,
+    text: str,
+    session_id: str,
+    role: str,
+    metadata_json: str | None,
+    extract_entities: bool,
+    extract_relations: bool,
+    generate_embedding: bool,
+):
+    """Add one short-term message."""
+    metadata = parse_json_option(metadata_json, "--metadata-json")
+    result = run_memory_operation(
+        connection,
+        lambda service: service.add_message(
+            session_id=session_id,
+            role=role,
+            text=text,
+            metadata=metadata,
+            extract_entities=extract_entities,
+            extract_relations=extract_relations,
+            generate_embedding=generate_embedding,
+        ),
+    )
+    echo_json(result)
+
+
+@memory.command("delete-message")
+@click.option("--id", "message_id", required=True, help="Message UUID.")
+@click.pass_obj
+def memory_delete_message(connection: MemoryCliConnection, message_id: str):
+    """Delete one short-term message by UUID."""
+    echo_json(run_memory_operation(connection, lambda service: service.delete_message(message_id)))
+
+
+@memory.command("start-trace")
+@click.option("--session-id", required=True, help="Target session ID.")
+@click.option("--task", required=True, help="Trace task label.")
+@click.option("--message-id", default=None, help="Optional triggering message UUID.")
+@click.option("--metadata-json", default=None, help="Optional JSON metadata.")
+@click.option("--generate-embedding/--no-generate-embedding", default=True, help="Generate task embedding.")
+@click.pass_obj
+def memory_start_trace(
+    connection: MemoryCliConnection,
+    session_id: str,
+    task: str,
+    message_id: str | None,
+    metadata_json: str | None,
+    generate_embedding: bool,
+):
+    """Start one reasoning trace."""
+    metadata = parse_json_option(metadata_json, "--metadata-json")
+    result = run_memory_operation(
+        connection,
+        lambda service: service.start_trace(
+            session_id=session_id,
+            task=task,
+            metadata=metadata,
+            generate_embedding=generate_embedding,
+            message_id=message_id,
+        ),
+    )
+    echo_json(result)
+
+
+@memory.command("add-trace-step")
+@click.option("--trace-id", required=True, help="Reasoning trace UUID.")
+@click.option("--thought", default=None, help="Concise reusable thought.")
+@click.option("--action", default=None, help="Action taken.")
+@click.option("--observation", default=None, help="Observation from the action.")
+@click.option("--metadata-json", default=None, help="Optional JSON metadata.")
+@click.option("--generate-embedding/--no-generate-embedding", default=True, help="Generate step embedding.")
+@click.pass_obj
+def memory_add_trace_step(
+    connection: MemoryCliConnection,
+    trace_id: str,
+    thought: str | None,
+    action: str | None,
+    observation: str | None,
+    metadata_json: str | None,
+    generate_embedding: bool,
+):
+    """Add one reasoning step."""
+    metadata = parse_json_option(metadata_json, "--metadata-json")
+    result = run_memory_operation(
+        connection,
+        lambda service: service.add_trace_step(
+            trace_id=trace_id,
+            thought=thought,
+            action=action,
+            observation=observation,
+            metadata=metadata,
+            generate_embedding=generate_embedding,
+        ),
+    )
+    echo_json(result)
+
+
+@memory.command("add-tool-call")
+@click.option("--step-id", required=True, help="Reasoning step UUID.")
+@click.option("--tool-name", required=True, help="Tool name.")
+@click.option("--arguments-json", default="{}", help="Tool arguments as JSON.")
+@click.option("--result-json", default=None, help="Tool result as JSON.")
+@click.option("--result-text", default=None, help="Tool result as plain text.")
+@click.option(
+    "--status",
+    type=click.Choice([status.value for status in ToolCallStatus]),
+    default=ToolCallStatus.SUCCESS.value,
+    help="Tool call status.",
+)
+@click.option("--duration-ms", type=int, default=None, help="Tool duration in milliseconds.")
+@click.option("--error", default=None, help="Error message when the tool failed.")
+@click.option("--auto-observation", is_flag=True, default=False, help="Populate the step observation automatically.")
+@click.option("--message-id", default=None, help="Optional triggering message UUID.")
+@click.pass_obj
+def memory_add_tool_call(
+    connection: MemoryCliConnection,
+    step_id: str,
+    tool_name: str,
+    arguments_json: str,
+    result_json: str | None,
+    result_text: str | None,
+    status: str,
+    duration_ms: int | None,
+    error: str | None,
+    auto_observation: bool,
+    message_id: str | None,
+):
+    """Record one tool call under a reasoning step."""
+    if result_json and result_text:
+        raise click.ClickException("Use either --result-json or --result-text, not both.")
+    arguments = parse_json_option(arguments_json, "--arguments-json")
+    result: Any | None = result_text
+    if result_json is not None:
+        result = parse_json_option(result_json, "--result-json")
+    payload = run_memory_operation(
+        connection,
+        lambda service: service.add_tool_call(
+            step_id=step_id,
+            tool_name=tool_name,
+            arguments=arguments or {},
+            result=result,
+            status=ToolCallStatus(status),
+            duration_ms=duration_ms,
+            error=error,
+            auto_observation=auto_observation,
+            message_id=message_id,
+        ),
+    )
+    echo_json(payload)
+
+
+@memory.command("complete-trace")
+@click.option("--trace-id", required=True, help="Reasoning trace UUID.")
+@click.option("--outcome", default=None, help="Outcome summary.")
+@click.option("--success", is_flag=True, default=False, help="Mark the trace as successful.")
+@click.option("--failure", is_flag=True, default=False, help="Mark the trace as failed.")
+@click.option(
+    "--generate-step-embeddings",
+    is_flag=True,
+    default=False,
+    help="Generate missing step embeddings before completion.",
+)
+@click.pass_obj
+def memory_complete_trace(
+    connection: MemoryCliConnection,
+    trace_id: str,
+    outcome: str | None,
+    success: bool,
+    failure: bool,
+    generate_step_embeddings: bool,
+):
+    """Complete one reasoning trace."""
+    if success and failure:
+        raise click.ClickException("Use either --success or --failure, not both.")
+    resolved_success: bool | None = True if success else False if failure else None
+    payload = run_memory_operation(
+        connection,
+        lambda service: service.complete_trace(
+            trace_id=trace_id,
+            outcome=outcome,
+            success=resolved_success,
+            generate_step_embeddings=generate_step_embeddings,
+        ),
+    )
+    echo_json(payload)
+
+
+@memory.command("add-entity")
+@click.option("--repo", required=True, help="Repository slug.")
+@click.option("--task", required=True, help="Task label.")
+@click.option("--name", required=True, help="Entity name.")
+@click.option("--type", "entity_type", required=True, help="Entity type.")
+@click.option("--description", default=None, help="Optional entity description.")
+@click.option("--scope", "scope_kind", type=click.Choice(["repo", "personal"]), default="repo")
+@click.option("--metadata-json", default=None, help="Optional JSON metadata.")
+@click.option("--resolve/--no-resolve", default=True, help="Run entity resolution.")
+@click.option("--deduplicate/--no-deduplicate", default=True, help="Run entity deduplication.")
+@click.option("--enrich/--no-enrich", default=False, help="Run enrichment.")
+@click.option("--geocode/--no-geocode", default=False, help="Run geocoding for location entities.")
+@click.pass_obj
+def memory_add_entity(
+    connection: MemoryCliConnection,
+    repo: str,
+    task: str,
+    name: str,
+    entity_type: str,
+    description: str | None,
+    scope_kind: str,
+    metadata_json: str | None,
+    resolve: bool,
+    deduplicate: bool,
+    enrich: bool,
+    geocode: bool,
+):
+    """Add or reuse one long-term entity."""
+    metadata = parse_json_option(metadata_json, "--metadata-json")
+    payload = run_memory_operation(
+        connection,
+        lambda service: service.add_entity(
+            repo=repo,
+            task=task,
+            name=name,
+            entity_type=entity_type,
+            description=description,
+            scope_kind=scope_kind,
+            metadata=metadata,
+            resolve=resolve,
+            deduplicate=deduplicate,
+            enrich=enrich,
+            geocode=geocode,
+        ),
+    )
+    echo_json(payload)
+
+
+@memory.command("update-entity")
+@click.option("--id", "entity_id", required=True, help="Existing entity UUID.")
+@click.option("--name", default=None, help="Override entity name.")
+@click.option("--canonical-name", default=None, help="Override canonical display name.")
+@click.option("--description", default=None, help="Override entity description.")
+@click.option("--metadata-json", default=None, help="Optional JSON metadata patch.")
+@click.pass_obj
+def memory_update_entity(
+    connection: MemoryCliConnection,
+    entity_id: str,
+    name: str | None,
+    canonical_name: str | None,
+    description: str | None,
+    metadata_json: str | None,
+):
+    """Update one entity without changing its identity."""
+    if name is None and canonical_name is None and description is None and metadata_json is None:
+        raise click.ClickException(
+            "Provide at least one of --name, --canonical-name, --description, or --metadata-json."
+        )
+    metadata = parse_json_option(metadata_json, "--metadata-json")
+    payload = run_memory_operation(
+        connection,
+        lambda service: service.update_entity(
+            entity_id=entity_id,
+            name=name,
+            canonical_name=canonical_name,
+            description=description,
+            metadata_updates=metadata,
+        ),
+    )
+    echo_json(payload)
+
+
+@memory.command("alias-entity")
+@click.option("--id", "entity_id", required=True, help="Existing entity UUID.")
+@click.option("--alias", required=True, help="Alias to add.")
+@click.pass_obj
+def memory_alias_entity(
+    connection: MemoryCliConnection,
+    entity_id: str,
+    alias: str,
+):
+    """Add one alias to an existing entity."""
+    payload = run_memory_operation(
+        connection,
+        lambda service: service.alias_entity(
+            entity_id=entity_id,
+            alias=alias,
+        ),
+    )
+    echo_json(payload)
+
+
+@memory.command("merge-entity")
+@click.option("--source-id", required=True, help="Entity UUID to merge from.")
+@click.option("--target-id", required=True, help="Entity UUID to merge into.")
+@click.pass_obj
+def memory_merge_entity(
+    connection: MemoryCliConnection,
+    source_id: str,
+    target_id: str,
+):
+    """Merge one entity into another and keep the target active."""
+    if source_id == target_id:
+        raise click.ClickException("Use different values for --source-id and --target-id.")
+    payload = run_memory_operation(
+        connection,
+        lambda service: service.merge_entity(
+            source_id=source_id,
+            target_id=target_id,
+        ),
+    )
+    echo_json(payload)
+
+
+@memory.command("add-preference")
+@click.option("--repo", required=True, help="Repository slug.")
+@click.option("--task", required=True, help="Task label.")
+@click.option("--category", required=True, help="Preference category.")
+@click.option("--preference", required=True, help="Preference text.")
+@click.option("--context", default=None, help="Optional preference context.")
+@click.option("--scope", "scope_kind", type=click.Choice(["repo", "personal"]), default="repo")
+@click.option("--confidence", type=float, default=1.0, help="Stored confidence score.")
+@click.option("--metadata-json", default=None, help="Optional JSON metadata.")
+@click.option("--generate-embedding/--no-generate-embedding", default=True, help="Generate embedding.")
+@click.pass_obj
+def memory_add_preference(
+    connection: MemoryCliConnection,
+    repo: str,
+    task: str,
+    category: str,
+    preference: str,
+    context: str | None,
+    scope_kind: str,
+    confidence: float,
+    metadata_json: str | None,
+    generate_embedding: bool,
+):
+    """Add or reuse one durable preference."""
+    metadata = parse_json_option(metadata_json, "--metadata-json")
+    payload = run_memory_operation(
+        connection,
+        lambda service: service.add_preference(
+            repo=repo,
+            task=task,
+            category=category,
+            preference=preference,
+            context=context,
+            scope_kind=scope_kind,
+            confidence=confidence,
+            metadata=metadata,
+            generate_embedding=generate_embedding,
+        ),
+    )
+    echo_json(payload)
+
+
+@memory.command("add-fact")
+@click.option("--repo", required=True, help="Repository slug.")
+@click.option("--task", required=True, help="Task label.")
+@click.option("--subject", required=True, help="Fact subject.")
+@click.option("--predicate", required=True, help="Fact predicate.")
+@click.option("--object-value", required=True, help="Fact object value.")
+@click.option("--scope", "scope_kind", type=click.Choice(["repo", "personal"]), default="repo")
+@click.option("--confidence", type=float, default=1.0, help="Stored confidence score.")
+@click.option("--metadata-json", default=None, help="Optional JSON metadata.")
+@click.option("--generate-embedding/--no-generate-embedding", default=True, help="Generate embedding.")
+@click.pass_obj
+def memory_add_fact(
+    connection: MemoryCliConnection,
+    repo: str,
+    task: str,
+    subject: str,
+    predicate: str,
+    object_value: str,
+    scope_kind: str,
+    confidence: float,
+    metadata_json: str | None,
+    generate_embedding: bool,
+):
+    """Add or reuse one durable fact."""
+    metadata = parse_json_option(metadata_json, "--metadata-json")
+    payload = run_memory_operation(
+        connection,
+        lambda service: service.add_fact(
+            repo=repo,
+            task=task,
+            subject=subject,
+            predicate=predicate,
+            obj=object_value,
+            scope_kind=scope_kind,
+            confidence=confidence,
+            metadata=metadata,
+            generate_embedding=generate_embedding,
+        ),
+    )
+    echo_json(payload)
+
+
+@memory.command("replace-preference")
+@click.option("--id", "preference_id", required=True, help="Existing preference UUID.")
+@click.option("--preference", required=True, help="New preference text.")
+@click.option("--category", default=None, help="Override category.")
+@click.option("--context", default=None, help="Override context.")
+@click.option("--repo", default=None, help="Override repo metadata.")
+@click.option("--task", default=None, help="Override task metadata.")
+@click.option("--scope", "scope_kind", type=click.Choice(["repo", "personal"]), default=None)
+@click.option("--confidence", type=float, default=None, help="Override stored confidence.")
+@click.option("--generate-embedding/--no-generate-embedding", default=True, help="Generate embedding.")
+@click.pass_obj
+def memory_replace_preference(
+    connection: MemoryCliConnection,
+    preference_id: str,
+    preference: str,
+    category: str | None,
+    context: str | None,
+    repo: str | None,
+    task: str | None,
+    scope_kind: str | None,
+    confidence: float | None,
+    generate_embedding: bool,
+):
+    """Create a new active preference and supersede the previous one."""
+    payload = run_memory_operation(
+        connection,
+        lambda service: service.replace_preference(
+            preference_id=preference_id,
+            preference=preference,
+            category=category,
+            context=context,
+            repo=repo,
+            task=task,
+            scope_kind=scope_kind,
+            confidence=confidence,
+            generate_embedding=generate_embedding,
+        ),
+    )
+    echo_json(payload)
+
+
+@memory.command("replace-fact")
+@click.option("--id", "fact_id", required=True, help="Existing fact UUID.")
+@click.option("--subject", default=None, help="Override subject.")
+@click.option("--predicate", default=None, help="Override predicate.")
+@click.option("--object-value", default=None, help="Override object value.")
+@click.option("--repo", default=None, help="Override repo metadata.")
+@click.option("--task", default=None, help="Override task metadata.")
+@click.option("--scope", "scope_kind", type=click.Choice(["repo", "personal"]), default=None)
+@click.option("--confidence", type=float, default=None, help="Override stored confidence.")
+@click.option("--generate-embedding/--no-generate-embedding", default=True, help="Generate embedding.")
+@click.pass_obj
+def memory_replace_fact(
+    connection: MemoryCliConnection,
+    fact_id: str,
+    subject: str | None,
+    predicate: str | None,
+    object_value: str | None,
+    repo: str | None,
+    task: str | None,
+    scope_kind: str | None,
+    confidence: float | None,
+    generate_embedding: bool,
+):
+    """Create a new active fact and supersede the previous one."""
+    if subject is None and predicate is None and object_value is None:
+        raise click.ClickException("Provide at least one of --subject, --predicate, or --object-value.")
+    payload = run_memory_operation(
+        connection,
+        lambda service: service.replace_fact(
+            fact_id=fact_id,
+            subject=subject,
+            predicate=predicate,
+            obj=object_value,
+            repo=repo,
+            task=task,
+            scope_kind=scope_kind,
+            confidence=confidence,
+            generate_embedding=generate_embedding,
+        ),
+    )
+    echo_json(payload)
+
+
+@memory.command("inspect")
+@click.option("--kind", type=click.Choice(["entity", "preference", "fact", "message"]), required=True)
+@click.option("--id", "entry_id", required=True, help="Entry UUID.")
+@click.pass_obj
+def memory_inspect(connection: MemoryCliConnection, kind: str, entry_id: str):
+    """Inspect one memory entry by UUID."""
+    echo_json(run_memory_operation(connection, lambda service: service.inspect(kind=kind, entry_id=entry_id)))
+
+
+@memory.command("search")
+@click.option("--kind", type=click.Choice(["entity", "preference", "fact", "message"]), required=True)
+@click.option("--query", required=True, help="Search query.")
+@click.option("--limit", type=int, default=10, help="Maximum results.")
+@click.option("--threshold", type=float, default=0.7, help="Minimum similarity threshold.")
+@click.option("--session-id", default=None, help="Optional session filter for messages.")
+@click.option("--category", default=None, help="Optional category filter for preferences.")
+@click.option(
+    "--include-superseded",
+    is_flag=True,
+    default=False,
+    help="Include superseded durable entries for facts and preferences.",
+)
+@click.pass_obj
+def memory_search(
+    connection: MemoryCliConnection,
+    kind: str,
+    query: str,
+    limit: int,
+    threshold: float,
+    session_id: str | None,
+    category: str | None,
+    include_superseded: bool,
+):
+    """Search one memory layer."""
+    payload = run_memory_operation(
+        connection,
+        lambda service: service.search(
+            kind=kind,
+            query=query,
+            limit=limit,
+            threshold=threshold,
+            session_id=session_id,
+            category=category,
+            include_superseded=include_superseded,
+        ),
+    )
+    echo_json(payload)
+
+
+@memory.command("get-context")
+@click.option("--query", required=True, help="Context retrieval query.")
+@click.option("--session-id", default=None, help="Optional session filter.")
+@click.option("--include-short-term/--no-include-short-term", default=True)
+@click.option("--include-long-term/--no-include-long-term", default=True)
+@click.option("--include-reasoning/--no-include-reasoning", default=True)
+@click.option("--max-items", type=int, default=10, help="Maximum items per layer.")
+@click.pass_obj
+def memory_get_context(
+    connection: MemoryCliConnection,
+    query: str,
+    session_id: str | None,
+    include_short_term: bool,
+    include_long_term: bool,
+    include_reasoning: bool,
+    max_items: int,
+):
+    """Assemble combined context across the enabled memory layers."""
+    payload = run_memory_operation(
+        connection,
+        lambda service: service.get_context(
+            query=query,
+            session_id=session_id,
+            include_short_term=include_short_term,
+            include_long_term=include_long_term,
+            include_reasoning=include_reasoning,
+            max_items=max_items,
+        ),
+    )
+    echo_json(payload)
+
+
+@memory.command("recall")
+@click.option("--repo", required=True, help="Repository slug.")
+@click.option("--task", required=True, help="Task label.")
+@click.option("--session-id", required=True, help="Task-scoped coding session ID.")
+@click.option("--query", default=None, help="Optional recall query. Defaults to the task label.")
+@click.option("--recent-messages", type=int, default=6, help="Maximum recent session messages.")
+@click.option("--max-preferences", type=int, default=5, help="Maximum durable preferences.")
+@click.option("--max-facts", type=int, default=5, help="Maximum durable facts.")
+@click.option("--max-entities", type=int, default=5, help="Maximum relevant entities.")
+@click.option("--max-traces", type=int, default=3, help="Maximum similar past tasks.")
+@click.pass_obj
+def memory_recall(
+    connection: MemoryCliConnection,
+    repo: str,
+    task: str,
+    session_id: str,
+    query: str | None,
+    recent_messages: int,
+    max_preferences: int,
+    max_facts: int,
+    max_entities: int,
+    max_traces: int,
+):
+    """Assemble coding-oriented startup recall for one task session."""
+    payload = run_memory_operation(
+        connection,
+        lambda service: service.recall(
+            repo=repo,
+            task=task,
+            session_id=session_id,
+            query=query,
+            recent_messages=recent_messages,
+            max_preferences=max_preferences,
+            max_facts=max_facts,
+            max_entities=max_entities,
+            max_traces=max_traces,
+        ),
+    )
+    echo_json(payload)
+
+
+@memory.command("delete")
+@click.option("--kind", type=click.Choice(["entity", "preference", "fact", "message"]), required=True)
+@click.option("--id", "entry_id", required=True, help="Entry UUID.")
+@click.pass_obj
+def memory_delete(connection: MemoryCliConnection, kind: str, entry_id: str):
+    """Delete one memory entry by UUID."""
+    echo_json(run_memory_operation(connection, lambda service: service.delete(kind=kind, entry_id=entry_id)))
 
 
 @cli.group()

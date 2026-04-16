@@ -1,6 +1,17 @@
 # Neo4j Agent Memory
 
-A graph-native memory system for AI agents. Store conversations, build knowledge graphs, and let your agents learn from their own reasoning -- all backed by Neo4j.
+A graph-native memory layer for AI agents, backed by Neo4j.
+
+It combines three complementary memory lanes:
+
+- `Short-term`: task or conversation history
+- `Long-term`: durable facts, preferences, and entities
+- `Reasoning`: traces, tool usage, and reusable outcomes
+
+The project can be used as a Python library, an MCP server, or a shell-first CLI.
+The current coding-agent workflow is now stable enough to support task-scoped
+sessions, startup recall, review-first durable writes, and explicit durable
+supersession.
 
 [![Neo4j Labs](https://img.shields.io/badge/Neo4j-Labs-6366F1?logo=neo4j)](https://neo4j.com/labs/)
 [![Status: Experimental](https://img.shields.io/badge/Status-Experimental-F59E0B)](https://neo4j.com/labs/)
@@ -14,177 +25,184 @@ A graph-native memory system for AI agents. Store conversations, build knowledge
 
 ![The Neo4j Agent Memory data model](img/memory-graph-model.png)
 
-| Short-Term Memory | Long-Term Memory | Reasoning Memory |
+| Layer | Purpose | Typical content |
 |---|---|---|
-| Conversations & messages | Entities, preferences, facts | Reasoning traces & tool usage |
-| Per-session history | Knowledge graph ([POLE+O model](https://neo4j.com/labs/agent-memory/explanation/poleo-model.html)) | Learn from past decisions |
-| Vector + text search | Entity resolution & dedup | Similar task retrieval |
+| Short-term | active run history | messages, session-local observations |
+| Long-term | durable reusable knowledge | facts, preferences, entities |
+| Reasoning | reusable task traces | steps, tool calls, outcomes |
 
-![The Neo4j Agent Memory entity extraction pipeline](img/extraction-pipeline.png)
+Neo4j Agent Memory also supports entity extraction, relationship extraction,
+deduplication, enrichment, framework integrations, and MCP-based usage for
+assistant hosts.
 
-**Plus:** multi-stage entity extraction (spaCy / GLiNER / LLM), relationship extraction (GLiREL), background enrichment (Wikipedia / Diffbot), geospatial queries, [MCP server](#mcp-server) with 16 tools, and integrations with [LangChain, Pydantic AI, Google ADK, Strands, CrewAI, and more](#framework-integrations).
+## Coding-Agent V1
 
-## Quick Start
+The coding-agent workflow now has a clear operational contract:
 
-**Prerequisites:** A running Neo4j instance ([Neo4j Desktop](https://neo4j.com/download/), [Docker](https://hub.docker.com/_/neo4j), or [Neo4j Aura](https://neo4j.com/cloud/) for a free cloud database).
+- one `session_id` per active coding task
+- selective short-term writes instead of noisy full logs
+- review-first durable writes for facts, preferences, and curated entities
+- coding-oriented startup recall via `CodingAgentMemory.get_startup_recall()`
+  and `neo4j-agent-memory memory recall`
+- durable supersession that keeps metadata status and explicit
+  `SUPERSEDED_BY` graph edges for facts and preferences
 
-### Option A: MCP Server (zero code)
+For the shell-first workflow, start with the local skill:
 
-Give any MCP-compatible AI assistant (Claude Desktop, Claude Code, Cursor, VS Code Copilot) persistent memory backed by a knowledge graph:
+- [Agent Memory skill](skill/agent-memory/SKILL.md)
+- [Coding agent workflow example](examples/coding_agent_workflow.py)
+- [Coding-agent usage model](.spark_utils/data/20260410_coding_agent_usage_model.md)
 
-```bash
-# Run directly with uvx (no install needed)
-uvx "neo4j-agent-memory[mcp]" mcp serve --password <neo4j-password>
-```
+## What V2 Will Add
 
-![Neo4j Agent Memory MCP server](img/memory-architecture.png)
+V2 is intended to make the memory model more graph-native and less ambiguous,
+without giving up the current V1 safety guarantees.
 
-**Claude Code:**
+The main directions are:
 
-```bash
-claude mcp add neo4j-agent-memory -- \
-  uvx "neo4j-agent-memory[mcp]" mcp serve --password <neo4j-password>
-```
+- explicit provenance edges from durable memories to messages, traces, or tool calls
+- stronger links from reasoning traces to the durable outcomes they produced
+- richer entity semantics and more reliable reviewed relation ingestion
+- optional persistence of long-term candidates and review history
+- tighter write policy and retrieval quality before any broader automation
 
-**Claude Desktop** (`claude_desktop_config.json`):
+What remains intentionally out of scope for now:
 
-```json
-{
-  "mcpServers": {
-    "neo4j-agent-memory": {
-      "command": "uvx",
-      "args": ["neo4j-agent-memory[mcp]", "mcp", "serve", "--password", "your-password"],
-      "env": {
-        "OPENAI_API_KEY": "sk-..."
-      }
-    }
-  }
-}
-```
+- aggressive auto-promotion from short-term to long-term
+- broad LLM fallback everywhere
+- graph expansion without strong provenance
 
-### Option B: Python API
+Roadmap note:
 
-![The memory abstractions exposed by the Neo4j Agent Memory package](img/memory-types.png)
+- [V2 roadmap and assumptions](.spark_utils/ideas_and_assumptions/20260414_agent_memory_v2_roadmap.md)
+
+## Choose A Surface
+
+### Python API
+
+Use the native client when you want direct programmatic control:
 
 ```python
-import asyncio
 from neo4j_agent_memory import MemoryClient, MemorySettings
-
-async def main():
-    settings = MemorySettings(
-        neo4j={"uri": "bolt://localhost:7687", "password": "your-password"}
-    )
-
-    async with MemoryClient(settings) as memory:
-        # Store a conversation message
-        await memory.short_term.add_message(
-            session_id="user-123", role="user",
-            content="Hi, I'm John and I love Italian food!"
-        )
-
-        # Build the knowledge graph
-        await memory.long_term.add_entity("John", "PERSON")
-        await memory.long_term.add_preference(
-            category="food", preference="Loves Italian cuisine"
-        )
-
-        # Get combined context for an LLM prompt
-        context = await memory.get_context(
-            "What restaurant should I recommend?",
-            session_id="user-123"
-        )
-        print(context)
-
-asyncio.run(main())
 ```
 
-### Option C: Full-Stack App with create-context-graph
+For task-scoped coding workflows, prefer:
 
-Scaffold a complete full-stack AI application with built-in context graph memory:
+```python
+from neo4j_agent_memory import CodingAgentMemory
+```
+
+Key references:
+
+- [Getting started](docs/modules/ROOT/pages/getting-started.adoc)
+- [MemoryClient API](docs/modules/ROOT/pages/reference/api/memory-client.adoc)
+- [Short-term API](docs/modules/ROOT/pages/reference/api/short-term.adoc)
+
+### Shell-First CLI
+
+Use the `memory` command group when you want a real operational workflow from
+the terminal:
 
 ```bash
-uvx create-context-graph
+neo4j-agent-memory memory --local-embedder <command> ...
 ```
 
-![Create Context Graph full stack context graph application powered by Neo4j Agent Memory](img/app-three-panel.png)
+For coding work, the core commands are:
 
-This generates a ready-to-run project with a FastAPI backend, Next.js frontend, Neo4j knowledge graph, and neo4j-agent-memory pre-configured. See [create-context-graph.dev](https://create-context-graph.dev) for details.
+- `session-id`
+- `recall`
+- `add-message`
+- `start-trace`
+- `add-trace-step`
+- `add-tool-call`
+- `complete-trace`
+- `add-fact`
+- `add-preference`
+- `add-entity`
+- `replace-fact`
+- `replace-preference`
+- `update-entity`
+- `alias-entity`
+- `merge-entity`
+- `inspect`
+- `search`
+- `get-context`
+
+Reference:
+
+- [CLI reference](docs/modules/ROOT/pages/reference/cli.adoc)
+
+### MCP Server
+
+Use the MCP server when you want Neo4j-backed memory exposed as tools to
+Claude Desktop, Claude Code, Cursor, VS Code Copilot, or another MCP host.
+
+Reference:
+
+- [MCP tools reference](docs/modules/ROOT/pages/reference/mcp-tools.adoc)
 
 ## Installation
 
 ```bash
-pip install neo4j-agent-memory                  # Core
-pip install neo4j-agent-memory[openai]          # + OpenAI embeddings
-pip install neo4j-agent-memory[mcp]             # + MCP server
-pip install neo4j-agent-memory[langchain]       # + LangChain
-pip install neo4j-agent-memory[all]             # Everything
+pip install neo4j-agent-memory
+pip install neo4j-agent-memory[cli]
+pip install neo4j-agent-memory[mcp]
+pip install neo4j-agent-memory[all]
 ```
 
-See the [getting started guide](https://neo4j.com/labs/agent-memory/getting-started.html) for all extras (Vertex AI, Bedrock, spaCy, GLiNER, Google ADK, Strands, etc.).
+Package setup and optional extras are described in:
 
-## Framework Integrations
-
-| Framework | Extra | Import |
-|---|---|---|
-| [LangChain](https://neo4j.com/labs/agent-memory/how-to/integrations/langchain.html) | `[langchain]` | `from neo4j_agent_memory.integrations.langchain import Neo4jAgentMemory` |
-| [Pydantic AI](https://neo4j.com/labs/agent-memory/how-to/integrations/pydantic-ai.html) | `[pydantic-ai]` | `from neo4j_agent_memory.integrations.pydantic_ai import MemoryDependency` |
-| [Google ADK](https://neo4j.com/labs/agent-memory/how-to/integrations/google-cloud.html) | `[google-adk]` | `from neo4j_agent_memory.integrations.google_adk import Neo4jMemoryService` |
-| [Strands (AWS)](https://neo4j.com/labs/agent-memory/how-to/integrations/aws-strands.html) | `[strands]` | `from neo4j_agent_memory.integrations.strands import context_graph_tools` |
-| [CrewAI](https://neo4j.com/labs/agent-memory/how-to/integrations/crewai.html) | `[crewai]` | `from neo4j_agent_memory.integrations.crewai import Neo4jCrewMemory` |
-| [LlamaIndex](https://neo4j.com/labs/agent-memory/how-to/integrations/llamaindex.html) | `[llamaindex]` | `from neo4j_agent_memory.integrations.llamaindex import Neo4jLlamaIndexMemory` |
-| [OpenAI Agents](https://neo4j.com/labs/agent-memory/how-to/integrations/openai-agents.html) | `[openai-agents]` | `from neo4j_agent_memory.integrations.openai_agents import ...` |
-| [Microsoft Agent](https://neo4j.com/labs/agent-memory/how-to/integrations/microsoft-agent.html) | `[microsoft-agent]` | `from neo4j_agent_memory.integrations.microsoft_agent import Neo4jMicrosoftMemory` |
-
-## MCP Server
-
-The MCP server exposes memory capabilities as tools for AI assistants.
-
-```bash
-# stdio transport (Claude Desktop, Claude Code)
-neo4j-agent-memory mcp serve --password <pw>
-
-# SSE transport (network deployment)
-neo4j-agent-memory mcp serve --transport sse --port 8080 --password <pw>
-
-# Core profile (fewer tools, less context overhead)
-neo4j-agent-memory mcp serve --profile core --password <pw>
-
-# Session continuity across conversations
-neo4j-agent-memory mcp serve --session-strategy per_day --user-id alice --password <pw>
-```
-
-**Tool Profiles:**
-
-| Profile | Tools | Description |
-|---------|-------|-------------|
-| **core** | 6 | Essential read/write: `memory_search`, `memory_get_context`, `memory_store_message`, `memory_add_entity`, `memory_add_preference`, `memory_add_fact` |
-| **extended** (default) | 16 | Full surface adding: conversation history, entity details, graph export, relationship creation, reasoning traces, observations, read-only Cypher |
-
-See the [MCP tools reference](https://neo4j.com/labs/agent-memory/reference/mcp-tools.html) for full details.
+- [Getting started](docs/modules/ROOT/pages/getting-started.adoc)
+- [Reference index](docs/modules/ROOT/pages/reference/index.adoc)
 
 ## Examples
 
-| Example | Framework | Description |
-|---------|-----------|-------------|
-| [Lenny's Podcast Memory Explorer](examples/lennys-memory/) | PydanticAI | Flagship demo: 299 podcast episodes, knowledge graph, geospatial maps, Wikipedia enrichment |
-| [Full-Stack Chat Agent](examples/full-stack-chat-agent/) | PydanticAI | News research assistant with NVL graph visualization and auto-preference detection |
-| [AWS Financial Advisor](examples/aws-financial-services-advisor/) | Strands (AWS) | Multi-agent KYC/AML compliance with Bedrock and reasoning trace audit trails |
-| [Google Cloud Financial Advisor](examples/google-cloud-financial-advisor/) | Google ADK | Multi-agent compliance with Vertex AI embeddings and real-time SSE streaming |
-| [Microsoft Retail Assistant](examples/microsoft_agent_retail_assistant/) | Microsoft Agent | Shopping recommendations with GDS algorithms, entity deduplication, and context providers |
-| [Domain Schema Examples](examples/domain-schemas/) | Standalone | 8 GLiNER2 extraction scripts with factory pattern, batch extraction, streaming, and GLiREL relations |
-| [Google Cloud Integration](examples/google_cloud_integration/) | Google ADK | Progressive tutorial: Vertex AI, ADK, MCP server, and MemoryIntegration with session strategies |
-| [Google ADK Demo](examples/google_adk_demo/) | Google ADK | Standalone demo of Neo4jMemoryService with session storage, search, and preferences |
+This repository includes both general examples and coding-agent-specific ones.
 
-All examples use `neo4j-agent-memory>=0.1.0` and demonstrate the latest features including `ExtractionConfig`, `DeduplicationConfig`, `MemoryIntegration`, and `SessionStrategy`.
+Highlighted examples:
+
+- [Coding Agent Workflow](examples/coding_agent_workflow.py)
+- [Coding Agent Smoke Test](examples/coding_agent_smoke_test.py)
+- [Examples overview in the docs](docs/modules/ROOT/pages/index.adoc)
 
 ## Documentation
 
-Full documentation at **[neo4j.com/labs/agent-memory](https://neo4j.com/labs/agent-memory/)**
+Local docs entry points:
 
-- [Tutorials](https://neo4j.com/labs/agent-memory/tutorials/) -- Build your first memory-enabled agent
-- [How-To Guides](https://neo4j.com/labs/agent-memory/how-to/) -- Entity extraction, deduplication, enrichment, integrations
-- [API Reference](https://neo4j.com/labs/agent-memory/reference/) -- Configuration, CLI, MCP tools
-- [Concepts](https://neo4j.com/labs/agent-memory/explanation/) -- POLE+O model, memory types, extraction pipeline
+- [Docs home](docs/modules/ROOT/pages/index.adoc)
+- [Getting started](docs/modules/ROOT/pages/getting-started.adoc)
+- [How-to guides](docs/modules/ROOT/pages/how-to/index.adoc)
+- [Reference index](docs/modules/ROOT/pages/reference/index.adoc)
+- [FAQ](docs/modules/ROOT/pages/faq.adoc)
+
+Published documentation:
+
+- [neo4j.com/labs/agent-memory](https://neo4j.com/labs/agent-memory/)
+
+## Framework Integrations
+
+The project includes integrations for multiple agent frameworks and runtimes,
+including LangChain, Pydantic AI, Google ADK, Strands, CrewAI, LlamaIndex,
+OpenAI Agents, and Microsoft Agent.
+
+Reference:
+
+- [Integration docs](docs/modules/ROOT/pages/how-to/integrations/index.adoc)
+
+## Acknowledgements 💜
+
+This repository builds on prior open-source work.
+
+- It is forked from the original Neo4j Labs `agent-memory` repository and
+  continues from that foundation for the current workflow and product direction.
+- Several coding-memory concepts, especially around startup recall, durable
+  knowledge discipline, and trajectory-informed reuse, were shaped by ideas
+  explored in `voidm`.
+
+References:
+
+- 💪 `neo4j-labs/agent-memory`: https://github.com/neo4j-labs/agent-memory
+- 🚀 `autonomous-toaster/voidm`: https://github.com/autonomous-toaster/voidm
 
 ## Development
 
@@ -192,21 +210,12 @@ Full documentation at **[neo4j.com/labs/agent-memory](https://neo4j.com/labs/age
 git clone https://github.com/neo4j-labs/agent-memory.git
 cd agent-memory/neo4j-agent-memory
 uv sync --group dev
-make test-unit    # Run unit tests
-make check        # Lint + format + typecheck
+make test-unit
+make check
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the full development guide, CI pipeline, and documentation guidelines.
+For repo-local coding usage, the practical workflow is described in the skill
+and examples rather than in this README:
 
-## Requirements
-
-- Python 3.10+
-- Neo4j 5.20+ (for vector indexes)
-
-## License
-
-Apache License 2.0
-
----
-
-This is a [Neo4j Labs](https://neo4j.com/labs/) project -- community supported, not officially backed by Neo4j. [Community Forum](https://community.neo4j.com) | [GitHub Issues](https://github.com/neo4j-labs/agent-memory/issues) | [Documentation](https://neo4j.com/labs/agent-memory/)
+- [Agent Memory skill](skill/agent-memory/SKILL.md)
+- [Coding Agent Workflow](examples/coding_agent_workflow.py)

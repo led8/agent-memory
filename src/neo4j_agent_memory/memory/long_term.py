@@ -1,13 +1,15 @@
 """Long-term memory for entities, preferences, and facts."""
 
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
+from neo4j.exceptions import Neo4jError
 from pydantic import Field
 
 from neo4j_agent_memory.core.memory import BaseMemory, MemoryEntry
@@ -122,6 +124,11 @@ class DeduplicationStats:
     pending_reviews: int = 0
 
 
+def _utc_now() -> datetime:
+    """Return a timezone-aware UTC timestamp."""
+    return datetime.now(UTC)
+
+
 def _serialize_metadata(metadata: dict[str, Any] | None) -> str | None:
     """Serialize metadata dict to JSON string for Neo4j storage."""
     if metadata is None or metadata == {}:
@@ -139,17 +146,32 @@ def _deserialize_metadata(metadata_str: str | None) -> dict[str, Any]:
         return {}
 
 
+def _is_superseded_metadata(metadata: dict[str, Any]) -> bool:
+    """Whether metadata marks a durable entry as superseded."""
+    return metadata.get("status") == "superseded"
+
+
 def _to_python_datetime(neo4j_datetime) -> datetime:
     """Convert Neo4j DateTime to Python datetime."""
     if neo4j_datetime is None:
-        return datetime.utcnow()
+        return _utc_now()
     if isinstance(neo4j_datetime, datetime):
         return neo4j_datetime
     # Neo4j DateTime has to_native() method
     try:
         return neo4j_datetime.to_native()
     except AttributeError:
-        return datetime.utcnow()
+        return _utc_now()
+
+
+def _merge_aliases(*groups: list[str] | None) -> list[str]:
+    """Merge alias lists while preserving order and removing empties."""
+    merged: list[str] = []
+    for group in groups:
+        for alias in group or []:
+            if alias and alias not in merged:
+                merged.append(alias)
+    return merged
 
 
 if TYPE_CHECKING:
@@ -496,7 +518,7 @@ class LongTermMemory(BaseMemory[Entity]):
 
         # Store entity with dynamic labels for type/subtype
         create_query = build_create_entity_query(entity.type, entity.subtype)
-        await self._client.execute_write(
+        results = await self._client.execute_write(
             create_query,
             {
                 "id": str(entity.id),
@@ -511,6 +533,31 @@ class LongTermMemory(BaseMemory[Entity]):
                 "location": location_point,  # Neo4j Point for LOCATION entities
             },
         )
+
+        persisted = entity
+        if results:
+            persisted = self._parse_entity(dict(results[0]["e"]))
+
+        if entity.aliases or entity.attributes or entity.metadata:
+            storage_metadata = {**entity.metadata}
+            if entity.attributes:
+                storage_metadata["attributes"] = entity.attributes
+            if entity.aliases:
+                storage_metadata["aliases"] = entity.aliases
+            await self._client.execute_write(
+                queries.UPDATE_ENTITY,
+                {
+                    "id": str(persisted.id),
+                    "name": persisted.name,
+                    "canonical_name": persisted.canonical_name,
+                    "description": persisted.description,
+                    "aliases": entity.aliases,
+                    "metadata": _serialize_metadata(storage_metadata),
+                },
+            )
+            refreshed = await self._get_entity_by_id(persisted.id)
+            if refreshed is not None:
+                persisted = refreshed
 
         # If flagged for review, create SAME_AS relationship
         if dedup_result.action == "flagged" and dedup_result.matched_entity_id:
@@ -535,7 +582,7 @@ class LongTermMemory(BaseMemory[Entity]):
                 confidence=entity.confidence,
             )
 
-        return entity, dedup_result
+        return persisted, dedup_result
 
     async def add_preference(
         self,
@@ -743,6 +790,82 @@ class LongTermMemory(BaseMemory[Entity]):
 
         return self._parse_entity(entity_data)
 
+    async def get_entity_by_id(self, entity_id: UUID | str) -> Entity | None:
+        """Get an entity by UUID."""
+        resolved_id = entity_id if isinstance(entity_id, UUID) else UUID(entity_id)
+        return await self._get_entity_by_id(resolved_id)
+
+    async def update_entity(
+        self,
+        entity_id: UUID | str,
+        *,
+        name: str | None = None,
+        canonical_name: str | None = None,
+        description: str | None = None,
+        metadata_updates: dict[str, Any] | None = None,
+    ) -> Entity | None:
+        """Update an entity without changing its identity."""
+        resolved_id = entity_id if isinstance(entity_id, UUID) else UUID(entity_id)
+        entity = await self._get_entity_by_id(resolved_id)
+        if entity is None:
+            return None
+
+        old_name = entity.name
+        next_name = name or entity.name
+        next_canonical_name = canonical_name
+        if next_canonical_name is None:
+            if name is not None and (entity.canonical_name is None or entity.canonical_name == old_name):
+                next_canonical_name = next_name
+            else:
+                next_canonical_name = entity.canonical_name
+
+        next_aliases = list(entity.aliases or [])
+        if name is not None and name != old_name:
+            if old_name not in next_aliases:
+                next_aliases.append(old_name)
+            next_aliases = [alias for alias in next_aliases if alias != next_name]
+
+        next_metadata = {**entity.metadata, **(metadata_updates or {})}
+        storage_metadata = {**next_metadata}
+        if entity.attributes:
+            storage_metadata["attributes"] = entity.attributes
+        if next_aliases:
+            storage_metadata["aliases"] = next_aliases
+
+        results = await self._client.execute_write(
+            queries.UPDATE_ENTITY,
+            {
+                "id": str(resolved_id),
+                "name": next_name,
+                "canonical_name": next_canonical_name,
+                "description": description if description is not None else entity.description,
+                "aliases": next_aliases,
+                "metadata": _serialize_metadata(storage_metadata),
+            },
+        )
+        if not results:
+            return None
+        return self._parse_entity(dict(results[0]["e"]))
+
+    async def add_entity_alias(self, entity_id: UUID | str, alias: str) -> Entity | None:
+        """Add an alias to an existing entity."""
+        resolved_id = entity_id if isinstance(entity_id, UUID) else UUID(entity_id)
+        entity = await self._get_entity_by_id(resolved_id)
+        if entity is None:
+            return None
+
+        if alias == entity.name or alias == entity.canonical_name or alias in entity.aliases:
+            return entity
+
+        alias_owner = await self.get_entity_by_name(alias)
+        if alias_owner is not None and alias_owner.id != resolved_id:
+            raise ValueError(
+                f"Alias '{alias}' already resolves to entity {alias_owner.id}. Inspect or merge instead."
+            )
+
+        await self._add_alias_to_entity(resolved_id, alias)
+        return await self._get_entity_by_id(resolved_id)
+
     async def search(self, query: str, **kwargs: Any) -> list[Entity]:
         """Search for entities."""
         return await self.search_entities(query, **kwargs)
@@ -772,14 +895,17 @@ class LongTermMemory(BaseMemory[Entity]):
 
         query_embedding = await self._embedder.embed(query)
 
-        results = await self._client.execute_read(
-            queries.SEARCH_ENTITIES_BY_EMBEDDING,
-            {
-                "embedding": query_embedding,
-                "limit": limit,
-                "threshold": threshold,
-            },
-        )
+        try:
+            results = await self._client.execute_read(
+                queries.SEARCH_ENTITIES_BY_EMBEDDING,
+                {
+                    "embedding": query_embedding,
+                    "limit": limit,
+                    "threshold": threshold,
+                },
+            )
+        except Neo4jError:
+            return []
 
         # Normalize filter types
         filter_types: set[str] | None = None
@@ -801,6 +927,32 @@ class LongTermMemory(BaseMemory[Entity]):
 
         return entities
 
+    async def list_entities(
+        self,
+        *,
+        repo: str | None = None,
+        include_personal: bool = False,
+        limit: int = 100,
+    ) -> list[Entity]:
+        """List recent entities, optionally narrowed to one repo plus personal scope."""
+        fetch_limit = limit if repo is None else max(limit * 10, limit)
+        results = await self._client.execute_read(
+            queries.LIST_RECENT_ENTITIES,
+            {
+                "limit": fetch_limit,
+            },
+        )
+        entities = [self._parse_entity(dict(row["e"])) for row in results]
+        if repo is None:
+            return entities[:limit]
+        filtered = [
+            entity
+            for entity in entities
+            if entity.metadata.get("repo") == repo
+            or (include_personal and entity.metadata.get("scope_kind") == "personal")
+        ]
+        return filtered[:limit]
+
     async def search_preferences(
         self,
         query: str,
@@ -808,6 +960,7 @@ class LongTermMemory(BaseMemory[Entity]):
         category: str | None = None,
         limit: int = 10,
         threshold: float = 0.7,
+        include_superseded: bool = False,
     ) -> list[Preference]:
         """
         Search for preferences.
@@ -828,19 +981,27 @@ class LongTermMemory(BaseMemory[Entity]):
                     queries.SEARCH_PREFERENCES_BY_CATEGORY,
                     {"category": category, "limit": limit},
                 )
-                return [self._parse_preference(dict(r["p"])) for r in results]
+                preferences = [self._parse_preference(dict(r["p"])) for r in results]
+                if not include_superseded:
+                    preferences = [
+                        pref for pref in preferences if not _is_superseded_metadata(pref.metadata)
+                    ]
+                return preferences
             return []
 
         query_embedding = await self._embedder.embed(query)
 
-        results = await self._client.execute_read(
-            queries.SEARCH_PREFERENCES_BY_EMBEDDING,
-            {
-                "embedding": query_embedding,
-                "limit": limit,
-                "threshold": threshold,
-            },
-        )
+        try:
+            results = await self._client.execute_read(
+                queries.SEARCH_PREFERENCES_BY_EMBEDDING,
+                {
+                    "embedding": query_embedding,
+                    "limit": limit,
+                    "threshold": threshold,
+                },
+            )
+        except Neo4jError:
+            return []
 
         preferences = []
         for row in results:
@@ -851,10 +1012,43 @@ class LongTermMemory(BaseMemory[Entity]):
                 continue
 
             pref = self._parse_preference(pref_data)
+            if not include_superseded and _is_superseded_metadata(pref.metadata):
+                continue
             pref.metadata["similarity"] = row["score"]
             preferences.append(pref)
 
         return preferences
+
+    async def list_preferences(
+        self,
+        *,
+        repo: str | None = None,
+        include_personal: bool = False,
+        limit: int = 100,
+        include_superseded: bool = False,
+    ) -> list[Preference]:
+        """List recent preferences, optionally narrowed to one repo plus personal scope."""
+        fetch_limit = limit if repo is None else max(limit * 10, limit)
+        results = await self._client.execute_read(
+            queries.LIST_RECENT_PREFERENCES,
+            {
+                "limit": fetch_limit,
+            },
+        )
+        preferences = [self._parse_preference(dict(row["p"])) for row in results]
+        if not include_superseded:
+            preferences = [
+                pref for pref in preferences if not _is_superseded_metadata(pref.metadata)
+            ]
+        if repo is None:
+            return preferences[:limit]
+        filtered = [
+            pref
+            for pref in preferences
+            if pref.metadata.get("repo") == repo
+            or (include_personal and pref.metadata.get("scope_kind") == "personal")
+        ]
+        return filtered[:limit]
 
     async def get_related_entities(
         self,
@@ -930,6 +1124,7 @@ class LongTermMemory(BaseMemory[Entity]):
             query: Query to find relevant context
             include_entities: Whether to include entities
             include_preferences: Whether to include preferences
+            include_facts: Whether to include facts
             max_items: Maximum items per category
 
         Returns:
@@ -937,6 +1132,7 @@ class LongTermMemory(BaseMemory[Entity]):
         """
         include_entities = kwargs.get("include_entities", True)
         include_preferences = kwargs.get("include_preferences", True)
+        include_facts = kwargs.get("include_facts", True)
         max_items = kwargs.get("max_items", 10)
 
         parts = []
@@ -951,6 +1147,14 @@ class LongTermMemory(BaseMemory[Entity]):
                     if pref.context:
                         line += f" (context: {pref.context})"
                     parts.append(line)
+
+        # Get relevant facts
+        if include_facts:
+            facts = await self.search_facts(query, limit=max_items)
+            if facts:
+                parts.append("\n### Relevant Facts")
+                for fact in facts:
+                    parts.append(f"- {fact.subject} {fact.predicate} {fact.object}")
 
         # Get relevant entities
         if include_entities:
@@ -1115,9 +1319,7 @@ class LongTermMemory(BaseMemory[Entity]):
             return
 
         # Update aliases in metadata
-        current_aliases = entity.aliases or []
-        if alias not in current_aliases:
-            current_aliases.append(alias)
+        current_aliases = _merge_aliases(entity.aliases, [alias])
 
         # Update in database
         storage_metadata = {**entity.metadata}
@@ -1128,11 +1330,14 @@ class LongTermMemory(BaseMemory[Entity]):
         await self._client.execute_write(
             """
             MATCH (e:Entity {id: $id})
-            SET e.metadata = $metadata
+            SET e.aliases = $aliases,
+                e.metadata = $metadata,
+                e.updated_at = datetime()
             RETURN e
             """,
             {
                 "id": str(entity_id),
+                "aliases": current_aliases,
                 "metadata": _serialize_metadata(storage_metadata),
             },
         )
@@ -1207,7 +1412,30 @@ class LongTermMemory(BaseMemory[Entity]):
         source = self._parse_entity(dict(results[0]["source"]))
         target = self._parse_entity(dict(results[0]["target"]))
 
-        return source, target
+        merged_aliases = _merge_aliases(target.aliases, source.aliases, [source.name])
+        target_metadata = {**target.metadata}
+        if target.attributes:
+            target_metadata["attributes"] = target.attributes
+        if merged_aliases:
+            target_metadata["aliases"] = merged_aliases
+        await self._client.execute_write(
+            queries.UPDATE_ENTITY,
+            {
+                "id": str(target.id),
+                "name": target.name,
+                "canonical_name": target.canonical_name,
+                "description": target.description,
+                "aliases": merged_aliases,
+                "metadata": _serialize_metadata(target_metadata),
+            },
+        )
+
+        refreshed_source = await self._get_entity_by_id(source_id)
+        refreshed_target = await self._get_entity_by_id(target_id)
+        if refreshed_source is None or refreshed_target is None:
+            return None
+
+        return refreshed_source, refreshed_target
 
     async def review_duplicate(
         self,
@@ -1678,6 +1906,7 @@ class LongTermMemory(BaseMemory[Entity]):
         category: str,
         *,
         limit: int = 100,
+        include_superseded: bool = False,
     ) -> list[Preference]:
         """
         Get all preferences in a category.
@@ -1693,13 +1922,19 @@ class LongTermMemory(BaseMemory[Entity]):
             queries.SEARCH_PREFERENCES_BY_CATEGORY,
             {"category": category, "limit": limit},
         )
-        return [self._parse_preference(dict(r["p"])) for r in results]
+        preferences = [self._parse_preference(dict(r["p"])) for r in results]
+        if not include_superseded:
+            preferences = [
+                pref for pref in preferences if not _is_superseded_metadata(pref.metadata)
+            ]
+        return preferences
 
     async def get_facts_about(
         self,
         subject: str,
         *,
         limit: int = 100,
+        include_superseded: bool = False,
     ) -> list[Fact]:
         """
         Get all facts about a subject.
@@ -1715,7 +1950,10 @@ class LongTermMemory(BaseMemory[Entity]):
             queries.GET_FACTS_BY_SUBJECT,
             {"subject": subject, "limit": limit},
         )
-        return [self._parse_fact(dict(r["f"])) for r in results]
+        facts = [self._parse_fact(dict(r["f"])) for r in results]
+        if not include_superseded:
+            facts = [fact for fact in facts if not _is_superseded_metadata(fact.metadata)]
+        return facts
 
     async def search_facts(
         self,
@@ -1723,6 +1961,7 @@ class LongTermMemory(BaseMemory[Entity]):
         *,
         limit: int = 10,
         threshold: float = 0.7,
+        include_superseded: bool = False,
     ) -> list[Fact]:
         """
         Search for facts by semantic similarity.
@@ -1736,26 +1975,185 @@ class LongTermMemory(BaseMemory[Entity]):
             List of matching facts
         """
         if self._embedder is None:
-            return []
+            return await self._search_facts_by_text(
+                query,
+                limit=limit,
+                include_superseded=include_superseded,
+            )
 
         query_embedding = await self._embedder.embed(query)
 
+        try:
+            results = await self._client.execute_read(
+                queries.SEARCH_FACTS_BY_EMBEDDING,
+                {
+                    "embedding": query_embedding,
+                    "limit": limit,
+                    "threshold": threshold,
+                },
+            )
+        except Neo4jError:
+            return await self._search_facts_by_text(
+                query,
+                limit=limit,
+                include_superseded=include_superseded,
+            )
+
+        facts = []
+        for row in results:
+            fact = self._parse_fact(dict(row["f"]))
+            if not include_superseded and _is_superseded_metadata(fact.metadata):
+                continue
+            fact.metadata["similarity"] = row["score"]
+            facts.append(fact)
+
+        if facts:
+            return facts
+
+        return await self._search_facts_by_text(
+            query,
+            limit=limit,
+            include_superseded=include_superseded,
+        )
+
+    async def list_facts(
+        self,
+        *,
+        repo: str | None = None,
+        include_personal: bool = False,
+        limit: int = 100,
+        include_superseded: bool = False,
+    ) -> list[Fact]:
+        """List recent facts, optionally narrowed to one repo plus personal scope."""
+        fetch_limit = limit if repo is None else max(limit * 10, limit)
         results = await self._client.execute_read(
-            queries.SEARCH_FACTS_BY_EMBEDDING,
+            queries.LIST_RECENT_FACTS,
             {
-                "embedding": query_embedding,
+                "limit": fetch_limit,
+            },
+        )
+        facts = [self._parse_fact(dict(row["f"])) for row in results]
+        if not include_superseded:
+            facts = [fact for fact in facts if not _is_superseded_metadata(fact.metadata)]
+        if repo is None:
+            return facts[:limit]
+        filtered = [
+            fact
+            for fact in facts
+            if fact.metadata.get("repo") == repo
+            or (include_personal and fact.metadata.get("scope_kind") == "personal")
+        ]
+        return filtered[:limit]
+
+    async def _search_facts_by_text(
+        self,
+        query: str,
+        *,
+        limit: int,
+        include_superseded: bool,
+    ) -> list[Fact]:
+        """Fall back to lexical fact search when vector recall yields nothing."""
+        terms = list(dict.fromkeys(re.findall(r"[a-z0-9-]+", query.lower())))
+        if not terms:
+            return []
+
+        results = await self._client.execute_read(
+            queries.SEARCH_FACTS_BY_TEXT,
+            {
+                "terms": terms,
                 "limit": limit,
-                "threshold": threshold,
             },
         )
 
         facts = []
         for row in results:
             fact = self._parse_fact(dict(row["f"]))
-            fact.metadata["similarity"] = row["score"]
+            if not include_superseded and _is_superseded_metadata(fact.metadata):
+                continue
+            fact.metadata["text_overlap"] = row["overlap"]
             facts.append(fact)
 
         return facts
+
+    async def update_preference_metadata(
+        self,
+        preference_id: UUID | str,
+        metadata: dict[str, Any],
+    ) -> Preference | None:
+        """Replace metadata for a preference and return the updated node."""
+        if isinstance(preference_id, UUID):
+            preference_id = str(preference_id)
+
+        results = await self._client.execute_write(
+            queries.UPDATE_PREFERENCE_METADATA,
+            {"id": preference_id, "metadata": _serialize_metadata(metadata)},
+        )
+        if not results:
+            return None
+        return self._parse_preference(dict(results[0]["p"]))
+
+    async def link_preference_supersession(
+        self,
+        old_preference_id: UUID | str,
+        new_preference_id: UUID | str,
+        *,
+        reason: str | None = None,
+    ) -> bool:
+        """Create or refresh an explicit preference supersession edge."""
+        old_id = str(old_preference_id)
+        new_id = str(new_preference_id)
+        if old_id == new_id:
+            return False
+
+        await self._client.execute_write(
+            queries.LINK_PREFERENCE_SUPERSEDED_BY,
+            {
+                "old_id": old_id,
+                "new_id": new_id,
+                "reason": reason,
+            },
+        )
+        return True
+
+    async def update_fact_metadata(
+        self,
+        fact_id: UUID | str,
+        metadata: dict[str, Any],
+    ) -> Fact | None:
+        """Replace metadata for a fact and return the updated node."""
+        if isinstance(fact_id, UUID):
+            fact_id = str(fact_id)
+
+        results = await self._client.execute_write(
+            queries.UPDATE_FACT_METADATA,
+            {"id": fact_id, "metadata": _serialize_metadata(metadata)},
+        )
+        if not results:
+            return None
+        return self._parse_fact(dict(results[0]["f"]))
+
+    async def link_fact_supersession(
+        self,
+        old_fact_id: UUID | str,
+        new_fact_id: UUID | str,
+        *,
+        reason: str | None = None,
+    ) -> bool:
+        """Create or refresh an explicit fact supersession edge."""
+        old_id = str(old_fact_id)
+        new_id = str(new_fact_id)
+        if old_id == new_id:
+            return False
+
+        await self._client.execute_write(
+            queries.LINK_FACT_SUPERSEDED_BY,
+            {
+                "old_id": old_id,
+                "new_id": new_id,
+                "reason": reason,
+            },
+        )
+        return True
 
     async def get_entity_relationships(
         self,
@@ -1781,7 +2179,7 @@ class LongTermMemory(BaseMemory[Entity]):
         """Parse entity from database result."""
         metadata = _deserialize_metadata(data.get("metadata"))
         attributes = metadata.pop("attributes", {})
-        aliases = metadata.pop("aliases", [])
+        aliases = _merge_aliases(data.get("aliases"), metadata.pop("aliases", []))
 
         return Entity(
             id=UUID(data["id"]),
@@ -1808,6 +2206,7 @@ class LongTermMemory(BaseMemory[Entity]):
             confidence=data.get("confidence", 1.0),
             embedding=data.get("embedding"),
             created_at=_to_python_datetime(data.get("created_at")),
+            updated_at=_to_python_datetime(data.get("updated_at")) if data.get("updated_at") else None,
             metadata=_deserialize_metadata(data.get("metadata")),
         )
 
@@ -1827,6 +2226,7 @@ class LongTermMemory(BaseMemory[Entity]):
             if data.get("valid_until")
             else None,
             created_at=_to_python_datetime(data.get("created_at")),
+            updated_at=_to_python_datetime(data.get("updated_at")) if data.get("updated_at") else None,
             metadata=_deserialize_metadata(data.get("metadata")),
         )
 

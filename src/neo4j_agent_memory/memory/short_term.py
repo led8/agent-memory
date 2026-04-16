@@ -2,16 +2,22 @@
 
 import json
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID, uuid4
 
+from neo4j.exceptions import Neo4jError
 from pydantic import BaseModel, Field
 
 from neo4j_agent_memory.core.memory import BaseMemory, MemoryEntry
 from neo4j_agent_memory.graph import queries
 from neo4j_agent_memory.graph.query_builder import build_create_entity_query
+
+
+def _utc_now() -> datetime:
+    """Return a timezone-aware UTC timestamp."""
+    return datetime.now(UTC)
 
 
 def _serialize_metadata(metadata: dict[str, Any] | None) -> str | None:
@@ -34,14 +40,14 @@ def _deserialize_metadata(metadata_str: str | None) -> dict[str, Any]:
 def _to_python_datetime(neo4j_datetime) -> datetime:
     """Convert Neo4j DateTime to Python datetime."""
     if neo4j_datetime is None:
-        return datetime.utcnow()
+        return _utc_now()
     if isinstance(neo4j_datetime, datetime):
         return neo4j_datetime
     # Neo4j DateTime has to_native() method
     try:
         return neo4j_datetime.to_native()
     except AttributeError:
-        return datetime.utcnow()
+        return _utc_now()
 
 
 def _build_metadata_filter_clause_json(
@@ -215,7 +221,7 @@ class Conversation(BaseModel):
     session_id: str = Field(description="User/agent session identifier")
     title: str | None = Field(default=None, description="Conversation title")
     messages: list[Message] = Field(default_factory=list)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=_utc_now)
     updated_at: datetime | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -251,9 +257,7 @@ class ConversationSummary(BaseModel):
         default_factory=list, description="Key entities mentioned in the conversation"
     )
     key_topics: list[str] = Field(default_factory=list, description="Key topics discussed")
-    generated_at: datetime = Field(
-        default_factory=datetime.utcnow, description="When summary was generated"
-    )
+    generated_at: datetime = Field(default_factory=_utc_now, description="When summary was generated")
 
 
 class ShortTermMemory(BaseMemory[Message]):
@@ -677,7 +681,10 @@ class ShortTermMemory(BaseMemory[Message]):
                 "threshold": threshold,
             }
 
-        results = await self._client.execute_read(cypher_query, params)
+        try:
+            results = await self._client.execute_read(cypher_query, params)
+        except Neo4jError:
+            return []
 
         messages = []
         for row in results:
@@ -908,13 +915,13 @@ class ShortTermMemory(BaseMemory[Message]):
 
                 for entity in extraction_result.entities:
                     # Create or get entity with dynamic labels for type/subtype
-                    entity_id = str(uuid4())
+                    generated_entity_id = str(uuid4())
                     entity_subtype = getattr(entity, "subtype", None)
                     create_query = build_create_entity_query(entity.type, entity_subtype)
-                    await self._client.execute_write(
+                    entity_rows = await self._client.execute_write(
                         create_query,
                         {
-                            "id": entity_id,
+                            "id": generated_entity_id,
                             "name": entity.name,
                             "type": entity.type,
                             "subtype": entity_subtype,
@@ -926,6 +933,9 @@ class ShortTermMemory(BaseMemory[Message]):
                             "location": None,  # Required for LOCATION entities
                         },
                     )
+                    entity_id = generated_entity_id
+                    if entity_rows:
+                        entity_id = str(entity_rows[0]["e"]["id"])
 
                     # Store mapping for relation linking
                     entity_name_to_id[entity.name.lower().strip()] = entity_id
@@ -1044,13 +1054,13 @@ class ShortTermMemory(BaseMemory[Message]):
 
         for entity in result.entities:
             # Create or get entity with dynamic labels for type/subtype
-            entity_id = str(uuid4())
+            generated_entity_id = str(uuid4())
             entity_subtype = getattr(entity, "subtype", None)
             create_query = build_create_entity_query(entity.type, entity_subtype)
-            await self._client.execute_write(
+            entity_rows = await self._client.execute_write(
                 create_query,
                 {
-                    "id": entity_id,
+                    "id": generated_entity_id,
                     "name": entity.name,
                     "type": entity.type,
                     "subtype": entity_subtype,
@@ -1062,6 +1072,9 @@ class ShortTermMemory(BaseMemory[Message]):
                     "location": None,  # Required for LOCATION entities
                 },
             )
+            entity_id = generated_entity_id
+            if entity_rows:
+                entity_id = str(entity_rows[0]["e"]["id"])
 
             # Store mapping for relation linking
             entity_name_to_id[entity.name.lower().strip()] = entity_id

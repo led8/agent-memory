@@ -1,15 +1,22 @@
 """Reasoning memory for reasoning traces and tool usage."""
 
 import json
-from datetime import datetime
+import re
+from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID, uuid4
 
+from neo4j.exceptions import Neo4jError
 from pydantic import BaseModel, Field
 
 from neo4j_agent_memory.core.memory import BaseMemory, MemoryEntry
 from neo4j_agent_memory.graph import queries
+
+
+def _utc_now() -> datetime:
+    """Return a timezone-aware UTC timestamp."""
+    return datetime.now(UTC)
 
 
 def _serialize_json(data: dict[str, Any] | list | None) -> str | None:
@@ -32,14 +39,14 @@ def _deserialize_json(data_str: str | None) -> dict[str, Any] | list | None:
 def _to_python_datetime(neo4j_datetime) -> datetime:
     """Convert Neo4j DateTime to Python datetime."""
     if neo4j_datetime is None:
-        return datetime.utcnow()
+        return _utc_now()
     if isinstance(neo4j_datetime, datetime):
         return neo4j_datetime
     # Neo4j DateTime has to_native() method
     try:
         return neo4j_datetime.to_native()
     except AttributeError:
-        return datetime.utcnow()
+        return _utc_now()
 
 
 if TYPE_CHECKING:
@@ -90,7 +97,7 @@ class ReasoningTrace(MemoryEntry):
     steps: list[ReasoningStep] = Field(default_factory=list, description="Reasoning steps")
     outcome: str | None = Field(default=None, description="Final outcome")
     success: bool | None = Field(default=None, description="Whether task succeeded")
-    started_at: datetime = Field(default_factory=datetime.utcnow, description="Start time")
+    started_at: datetime = Field(default_factory=_utc_now, description="Start time")
     completed_at: datetime | None = Field(default=None, description="Completion time")
 
 
@@ -225,7 +232,7 @@ class StreamingTraceRecorder:
         if self.trace is None:
             raise RuntimeError("Trace not started. Use within 'async with' context.")
 
-        self._step_start_time = datetime.utcnow()
+        self._step_start_time = _utc_now()
         self.current_step = await self.memory.add_step(
             self.trace.id,
             thought=thought,
@@ -271,7 +278,7 @@ class StreamingTraceRecorder:
 
         # Calculate duration if not provided
         if duration_ms is None and self._step_start_time is not None:
-            duration_ms = int((datetime.utcnow() - self._step_start_time).total_seconds() * 1000)
+            duration_ms = int((_utc_now() - self._step_start_time).total_seconds() * 1000)
 
         return await self.memory.record_tool_call(
             self.current_step.id,
@@ -751,39 +758,111 @@ class ReasoningMemory(BaseMemory[ReasoningStep]):
             List of similar reasoning traces
         """
         if self._embedder is None:
-            return []
+            return await self._search_traces_by_text(
+                task,
+                limit=limit,
+                success_only=success_only,
+            )
 
         task_embedding = await self._embedder.embed(task)
 
+        try:
+            results = await self._client.execute_read(
+                queries.SEARCH_TRACES_BY_EMBEDDING,
+                {
+                    "embedding": task_embedding,
+                    "limit": limit,
+                    "threshold": threshold,
+                    "success_only": success_only,
+                },
+            )
+        except Neo4jError:
+            return await self._search_traces_by_text(
+                task,
+                limit=limit,
+                success_only=success_only,
+            )
+
+        traces = []
+        for row in results:
+            traces.append(self._build_trace_summary(row, match_type="vector"))
+
+        if traces:
+            return traces
+
+        return await self._search_traces_by_text(
+            task,
+            limit=limit,
+            success_only=success_only,
+        )
+
+    async def _search_traces_by_text(
+        self,
+        query: str,
+        *,
+        limit: int,
+        success_only: bool,
+    ) -> list[ReasoningTrace]:
+        """Fall back to lexical reasoning trace search when vector recall misses."""
+        terms = list(dict.fromkeys(re.findall(r"[a-z0-9-]+", query.lower())))
+        if not terms:
+            return []
+
         results = await self._client.execute_read(
-            queries.SEARCH_TRACES_BY_EMBEDDING,
+            queries.SEARCH_TRACES_BY_TEXT,
             {
-                "embedding": task_embedding,
+                "terms": terms,
                 "limit": limit,
-                "threshold": threshold,
                 "success_only": success_only,
             },
         )
 
-        traces = []
-        for row in results:
-            trace_data = dict(row["rt"])
-            trace = ReasoningTrace(
-                id=UUID(trace_data["id"]),
-                session_id=trace_data["session_id"],
-                task=trace_data["task"],
-                task_embedding=trace_data.get("task_embedding"),
-                outcome=trace_data.get("outcome"),
-                success=trace_data.get("success"),
-                started_at=_to_python_datetime(trace_data.get("started_at")),
-                completed_at=_to_python_datetime(trace_data.get("completed_at"))
-                if trace_data.get("completed_at")
-                else None,
-                metadata={"similarity": row["score"]},
-            )
-            traces.append(trace)
+        return [self._build_trace_summary(row, match_type="text") for row in results]
 
-        return traces
+    def _build_trace_summary(self, row: dict[str, Any], *, match_type: str) -> ReasoningTrace:
+        """Build a lightweight reasoning trace summary from a query row."""
+        trace_data = dict(row["rt"])
+        metadata: dict[str, Any] = {"match_type": match_type}
+        if "score" in row:
+            metadata["similarity"] = row["score"]
+        if "overlap" in row:
+            metadata["text_overlap"] = row["overlap"]
+
+        return ReasoningTrace(
+            id=UUID(trace_data["id"]),
+            session_id=trace_data["session_id"],
+            task=trace_data["task"],
+            task_embedding=trace_data.get("task_embedding"),
+            outcome=trace_data.get("outcome"),
+            success=trace_data.get("success"),
+            started_at=_to_python_datetime(trace_data.get("started_at")),
+            completed_at=_to_python_datetime(trace_data.get("completed_at"))
+            if trace_data.get("completed_at")
+            else None,
+            metadata=metadata,
+        )
+
+    def _summarize_trace_details(self, trace: ReasoningTrace) -> dict[str, Any]:
+        """Extract concise action/tool/observation details from a full trace."""
+        actions = [step.action for step in trace.steps if step.action]
+        observations = [step.observation for step in trace.steps if step.observation]
+        tool_names: list[str] = []
+        for step in trace.steps:
+            for tool_call in step.tool_calls:
+                if tool_call.tool_name not in tool_names:
+                    tool_names.append(tool_call.tool_name)
+
+        return {
+            "action": actions[-1] if actions else None,
+            "observation": observations[-1] if observations else None,
+            "tools": tool_names[:3],
+        }
+
+    def _truncate_text(self, text: str, *, limit: int = 140) -> str:
+        """Keep reasoning context compact."""
+        if len(text) <= limit:
+            return text
+        return f"{text[: limit - 3]}..."
 
     async def get_tool_usage_stats(
         self,
@@ -910,17 +989,33 @@ class ReasoningMemory(BaseMemory[ReasoningStep]):
         if not traces:
             return ""
 
-        parts = ["### Similar Past Tasks"]
+        parts: list[str] = []
         for trace in traces:
-            similarity = trace.metadata.get("similarity", 0)
-            parts.append(f"\n**Task**: {trace.task}")
-            parts.append(f"- Similarity: {similarity:.2f}")
+            detailed_trace = await self.get_trace_with_steps(trace.id)
+            trace_for_context = detailed_trace or trace
+            similarity = trace.metadata.get("similarity")
+            text_overlap = trace.metadata.get("text_overlap")
+            details = self._summarize_trace_details(trace_for_context)
+            parts.append(f"**Task**: {trace.task}")
+            if similarity is not None:
+                parts.append(f"- Similarity: {similarity:.2f}")
+            elif text_overlap is not None:
+                parts.append(f"- Text overlap: {text_overlap}")
             if trace.outcome:
-                parts.append(f"- Outcome: {trace.outcome}")
+                parts.append(f"- Outcome: {self._truncate_text(trace.outcome)}")
             if trace.success is not None:
                 parts.append(f"- Success: {'Yes' if trace.success else 'No'}")
+            if details["action"]:
+                parts.append(f"- Key action: {self._truncate_text(details['action'], limit=100)}")
+            if details["tools"]:
+                parts.append(f"- Tools: {', '.join(details['tools'])}")
+            if details["observation"]:
+                parts.append(
+                    f"- Observation: {self._truncate_text(details['observation'], limit=120)}"
+                )
+            parts.append("")
 
-        return "\n".join(parts)
+        return "\n".join(parts).strip()
 
     async def get_trace_with_steps(self, trace_id: UUID) -> ReasoningTrace | None:
         """
@@ -950,6 +1045,8 @@ class ReasoningMemory(BaseMemory[ReasoningStep]):
         # Parse tool calls
         tool_calls_by_step: dict[str, list[ToolCall]] = {}
         for tc_data in tool_calls_data:
+            if tc_data is None:
+                continue
             tc = dict(tc_data)
             step_id = tc.get("step_id")
             if step_id:
@@ -970,6 +1067,8 @@ class ReasoningMemory(BaseMemory[ReasoningStep]):
         # Parse steps
         steps = []
         for step_data in steps_data:
+            if step_data is None:
+                continue
             sd = dict(step_data)
             step = ReasoningStep(
                 id=UUID(sd["id"]),

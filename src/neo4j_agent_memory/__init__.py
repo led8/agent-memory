@@ -107,6 +107,15 @@ class MemoryGraph(BaseModel):
 from neo4j_agent_memory.graph.client import Neo4jClient
 from neo4j_agent_memory.graph.schema import SchemaManager
 from neo4j_agent_memory.integration import MemoryIntegration, SessionStrategy
+from neo4j_agent_memory.integrations import (
+    CodingAgentMemory,
+    LongTermCandidateConfidence,
+    LongTermCandidateScopeKind,
+    LongTermCandidateSource,
+    LongTermCandidateType,
+    LongTermMemoryCandidate,
+    build_coding_session_id,
+)
 
 # Google Cloud integrations (v0.0.3+)
 # These are imported conditionally to avoid requiring google dependencies.
@@ -189,6 +198,13 @@ __all__ = [
     # Integration layer
     "MemoryIntegration",
     "SessionStrategy",
+    "CodingAgentMemory",
+    "LongTermCandidateConfidence",
+    "LongTermCandidateScopeKind",
+    "LongTermCandidateSource",
+    "LongTermCandidateType",
+    "LongTermMemoryCandidate",
+    "build_coding_session_id",
     # Settings
     "MemorySettings",
     "Neo4jConfig",
