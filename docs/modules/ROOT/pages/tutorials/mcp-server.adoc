@@ -39,7 +39,7 @@ Start a local Neo4j instance using Docker:
 docker run -d \
   --name neo4j-memory \
   -p 7474:7474 -p 7687:7687 \
-  -e NEO4J_AUTH=neo4j/test-password \
+  -e NEO4J_AUTH=neo4j/<your-local-password> \
   -e NEO4J_PLUGINS='["apoc"]' \
   neo4j:5
 ----
@@ -80,7 +80,7 @@ Add the neo4j-agent-memory server:
     "neo4j-agent-memory": {
       "command": "neo4j-agent-memory",
       "args": ["mcp", "serve",
-               "--password", "test-password"],
+               "--password", "<your-local-password>"],
       "env": {}
     }
   }
@@ -89,7 +89,7 @@ Add the neo4j-agent-memory server:
 
 Restart Claude Desktop to pick up the configuration.
 
-TIP: If you installed with `uvx`, use `"command": "uvx"` and `"args": ["neo4j-agent-memory[mcp]", "mcp", "serve", "--password", "test-password"]` instead.
+TIP: If you installed with `uvx`, use `"command": "uvx"` and `"args": ["neo4j-agent-memory[mcp]", "mcp", "serve", "--password", "<your-local-password>"]` instead.
 
 == Step 4: Verify the Connection
 
@@ -158,7 +158,7 @@ You can also start the MCP server from Python code:
 from neo4j_agent_memory import MemoryClient, MemorySettings
 
 settings = MemorySettings(
-    neo4j={"uri": "bolt://localhost:7687", "password": "test-password"}
+    neo4j={"uri": "bolt://localhost:7687", "password": "<your-local-password>"}
 )
 
 # Use MemoryIntegration for simplified memory operations
@@ -166,7 +166,7 @@ from neo4j_agent_memory import MemoryIntegration
 
 memory = MemoryIntegration(
     neo4j_uri="bolt://localhost:7687",
-    neo4j_password="test-password",
+    neo4j_password="<your-local-password>",
     session_strategy="per_day",
 )
 ----
@@ -188,7 +188,7 @@ By default, the server starts with the **extended** profile (16 tools). For simp
     "neo4j-agent-memory": {
       "command": "neo4j-agent-memory",
       "args": ["mcp", "serve",
-               "--password", "test-password",
+               "--password", "<your-local-password>",
                "--profile", "core"]
     }
   }

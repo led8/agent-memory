@@ -1789,7 +1789,7 @@ agent = ChatAgent(
 
 - `NEO4J_URI` - Neo4j connection URI (default: `bolt://localhost:7687`)
 - `NEO4J_USERNAME` - Neo4j username (default: `neo4j`)
-- `NEO4J_PASSWORD` - Neo4j password (default for tests: `test-password`)
+- `NEO4J_PASSWORD` - Neo4j password for your chosen instance
 - `OPENAI_API_KEY` - Required for OpenAI embeddings and LLM extraction
 - `GOOGLE_CLOUD_PROJECT` - GCP project ID for Vertex AI embeddings
 - `VERTEX_AI_LOCATION` - GCP region for Vertex AI (default: `us-central1`)
@@ -1856,10 +1856,10 @@ cp examples/.env.example examples/.env
 
 Key variables:
 - `NEO4J_URI` - If set, uses this Neo4j instance; if not set, auto-starts Docker
-- `NEO4J_PASSWORD` - Neo4j password (use `test-password` for Docker)
+- `NEO4J_PASSWORD` - Neo4j password for your chosen instance
 - `OPENAI_API_KEY` - Required for OpenAI embeddings and LLM extraction
 
-If `NEO4J_URI` is not set, the Makefile targets will automatically start the Docker Neo4j container with `test-password`.
+If `NEO4J_URI` is not set, the Makefile targets will automatically start the Docker Neo4j container using `NEO4J_TEST_PASSWORD` from `.env.test`.
 
 ## Full-Stack Chat Agent Example
 

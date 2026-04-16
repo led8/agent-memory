@@ -8,6 +8,17 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 cd "$PROJECT_DIR"
 
+if [ -f .env.test ]; then
+    set -a
+    . ./.env.test
+    set +a
+fi
+
+if [ -z "${NEO4J_TEST_PASSWORD:-}" ]; then
+    echo "Error: NEO4J_TEST_PASSWORD is not set. Copy .env.test.example to .env.test and set a local test password."
+    exit 1
+fi
+
 echo "=== Neo4j Agent Memory Integration Tests ==="
 echo ""
 
@@ -80,7 +91,7 @@ echo "Waiting for Neo4j to be ready..."
 for i in {1..60}; do
     if curl -s http://localhost:7474 > /dev/null 2>&1; then
         # Try a Cypher query to ensure it's fully ready
-        if docker exec neo4j-agent-memory-test cypher-shell -u neo4j -p test-password "RETURN 1" > /dev/null 2>&1; then
+        if docker exec neo4j-agent-memory-test cypher-shell -u neo4j -p "$NEO4J_TEST_PASSWORD" "RETURN 1" > /dev/null 2>&1; then
             echo "Neo4j is ready!"
             break
         fi
@@ -116,7 +127,7 @@ PYTEST_CMD="$PYTEST_CMD --tb=short"
 export RUN_INTEGRATION_TESTS=1
 export NEO4J_URI=bolt://localhost:7687
 export NEO4J_USERNAME=neo4j
-export NEO4J_PASSWORD=test-password
+export NEO4J_PASSWORD="$NEO4J_TEST_PASSWORD"
 
 eval $PYTEST_CMD
 

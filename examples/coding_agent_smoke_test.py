@@ -85,7 +85,7 @@ def build_settings() -> MemorySettings:
         neo4j=Neo4jConfig(
             uri=os.getenv("NEO4J_URI", "bolt://localhost:7687"),
             username=os.getenv("NEO4J_USERNAME", "neo4j"),
-            password=SecretStr(os.getenv("NEO4J_PASSWORD", "test-password")),
+            password=SecretStr(os.getenv("NEO4J_PASSWORD", "example-password")),
             database=os.getenv("NEO4J_DATABASE", "neo4j"),
         ),
         embedding=EmbeddingConfig(

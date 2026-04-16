@@ -276,7 +276,7 @@ def mock_environment(monkeypatch):
     """Set up test environment variables."""
     monkeypatch.setenv("NEO4J_URI", "bolt://localhost:7687")
     monkeypatch.setenv("NEO4J_USER", "neo4j")
-    monkeypatch.setenv("NEO4J_PASSWORD", "test-password")
+    monkeypatch.setenv("NEO4J_PASSWORD", "example-password")
     monkeypatch.setenv("NEO4J_DATABASE", "neo4j")
     monkeypatch.setenv("AWS_REGION", "us-east-1")
     monkeypatch.setenv("BEDROCK_MODEL", "anthropic.claude-sonnet-4-20250514-v1:0")

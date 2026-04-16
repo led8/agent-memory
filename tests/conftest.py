@@ -45,7 +45,7 @@ def _get_testcontainer():
             # Create Neo4j container with APOC plugin
             _neo4j_container = Neo4jContainer(
                 image="neo4j:5.26-community",
-                password="test-password",
+                password="example-password",
             )
             # Configure APOC plugin
             _neo4j_container.with_env("NEO4J_PLUGINS", '["apoc"]')
@@ -65,7 +65,7 @@ def _check_neo4j_env_available() -> dict | None:
         return None
 
     username = os.getenv("NEO4J_USERNAME", "neo4j")
-    password = os.getenv("NEO4J_PASSWORD", "test-password")
+    password = os.getenv("NEO4J_PASSWORD", "example-password")
 
     try:
         from neo4j import GraphDatabase

@@ -127,7 +127,7 @@ def _check_neo4j_env_available() -> dict | None:
         return None
 
     username = os.getenv("NEO4J_USERNAME", "neo4j")
-    password = os.getenv("NEO4J_PASSWORD", "test-password")
+    password = os.getenv("NEO4J_PASSWORD", "example-password")
 
     try:
         from neo4j import GraphDatabase

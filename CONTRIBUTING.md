@@ -82,16 +82,17 @@ cp examples/.env.example examples/.env
 
 Key variables:
 - `NEO4J_URI` - If set, uses this Neo4j; if not set, auto-starts Docker
-- `NEO4J_PASSWORD` - Neo4j password (`test-password` for Docker)
+- `NEO4J_PASSWORD` - Neo4j password for your chosen instance
 - `OPENAI_API_KEY` - Required for OpenAI embeddings and LLM extraction
 
 ```bash
 # Run with your own Neo4j (uses NEO4J_URI from .env)
 make example-basic
 
-# Or without .env (auto-starts Docker Neo4j)
+# Or without examples/.env (auto-starts Docker Neo4j)
+# First copy .env.test.example to .env.test and set NEO4J_TEST_PASSWORD
 rm examples/.env  # Ensure no .env file
-make example-basic  # Will start Docker with test-password
+make example-basic
 ```
 
 ## Testing

@@ -17,14 +17,14 @@ class TestStrandsConfig:
 
         env = {
             "NEO4J_URI": "neo4j+s://test.databases.neo4j.io",
-            "NEO4J_PASSWORD": "test-password",
+            "NEO4J_PASSWORD": "example-password",
         }
 
         with patch.dict(os.environ, env, clear=False):
             config = StrandsConfig.from_env()
 
         assert config.neo4j_uri == "neo4j+s://test.databases.neo4j.io"
-        assert config.neo4j_password == "test-password"
+        assert config.neo4j_password == "example-password"
         assert config.neo4j_user == "neo4j"
         assert config.neo4j_database == "neo4j"
         assert config.embedding_provider == "bedrock"
@@ -35,7 +35,7 @@ class TestStrandsConfig:
 
         env = {
             "NEO4J_URI": "neo4j+s://test.databases.neo4j.io",
-            "NEO4J_PASSWORD": "test-password",
+            "NEO4J_PASSWORD": "example-password",
             "NEO4J_USER": "custom-user",
             "NEO4J_DATABASE": "custom-db",
             "EMBEDDING_PROVIDER": "openai",
@@ -74,7 +74,7 @@ class TestStrandsConfig:
         """Test that missing NEO4J_URI raises ValueError."""
         from neo4j_agent_memory.integrations.strands.config import StrandsConfig
 
-        env = {"NEO4J_PASSWORD": "test-password"}
+        env = {"NEO4J_PASSWORD": "example-password"}
 
         with (
             patch.dict(os.environ, env, clear=True),
@@ -118,7 +118,7 @@ class TestStrandsConfig:
 
         config = StrandsConfig(
             neo4j_uri="neo4j+s://test.databases.neo4j.io",
-            neo4j_password="test-password",
+            neo4j_password="example-password",
             neo4j_user="custom-user",
             embedding_model="amazon.titan-embed-text-v2:0",
             aws_region="us-east-1",
@@ -127,7 +127,7 @@ class TestStrandsConfig:
         result = config.to_dict()
 
         assert result["neo4j_uri"] == "neo4j+s://test.databases.neo4j.io"
-        assert result["neo4j_password"] == "test-password"
+        assert result["neo4j_password"] == "example-password"
         assert result["neo4j_user"] == "custom-user"
         assert result["embedding_model"] == "amazon.titan-embed-text-v2:0"
         assert result["aws_region"] == "us-east-1"
@@ -138,7 +138,7 @@ class TestStrandsConfig:
 
         config = StrandsConfig(
             neo4j_uri="neo4j+s://test.databases.neo4j.io",
-            neo4j_password="test-password",
+            neo4j_password="example-password",
             embedding_model=None,
             aws_region=None,
         )
@@ -180,7 +180,7 @@ class TestContextGraphToolsFactory:
 
         env = {
             "NEO4J_URI": "neo4j+s://test.databases.neo4j.io",
-            "NEO4J_PASSWORD": "test-password",
+            "NEO4J_PASSWORD": "example-password",
         }
 
         with (
@@ -208,7 +208,7 @@ class TestContextGraphToolsFactory:
 
             env = {
                 "NEO4J_URI": "neo4j+s://test.databases.neo4j.io",
-                "NEO4J_PASSWORD": "test-password",
+                "NEO4J_PASSWORD": "example-password",
             }
 
             with patch.dict(os.environ, env, clear=False):

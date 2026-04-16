@@ -157,7 +157,7 @@ class TestStrandsIntegrationMocked:
 
             env = {
                 "NEO4J_URI": "neo4j+s://test.databases.neo4j.io",
-                "NEO4J_PASSWORD": "test-password",
+                "NEO4J_PASSWORD": "example-password",
             }
 
             with patch.dict(os.environ, env, clear=False):
@@ -171,7 +171,7 @@ class TestStrandsIntegrationMocked:
 
         env = {
             "NEO4J_URI": "neo4j+s://test.databases.neo4j.io",
-            "NEO4J_PASSWORD": "test-password",
+            "NEO4J_PASSWORD": "example-password",
             "AWS_REGION": "us-west-2",
         }
 
