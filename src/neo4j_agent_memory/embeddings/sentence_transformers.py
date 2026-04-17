@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 
 # Model dimensions mapping (common models)
 MODEL_DIMENSIONS = {
+    "BAAI/bge-small-en-v1.5": 384,
     "all-MiniLM-L6-v2": 384,
     "all-MiniLM-L12-v2": 384,
     "all-mpnet-base-v2": 768,
@@ -26,7 +27,7 @@ class SentenceTransformerEmbedder(BaseEmbedder):
 
     def __init__(
         self,
-        model_name: str = "all-MiniLM-L6-v2",
+        model_name: str = "BAAI/bge-small-en-v1.5",
         *,
         device: str = "cpu",
     ):

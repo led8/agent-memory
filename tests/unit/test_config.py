@@ -65,6 +65,23 @@ class TestEmbeddingConfig:
 
         assert config.provider == EmbeddingProvider.SENTENCE_TRANSFORMERS
         assert config.device == "cuda"
+        assert config.dimensions == 384
+
+    def test_sentence_transformers_defaults_follow_provider(self):
+        """Sentence-transformers should not inherit OpenAI defaults."""
+        config = EmbeddingConfig(provider=EmbeddingProvider.SENTENCE_TRANSFORMERS)
+
+        assert config.model == "BAAI/bge-small-en-v1.5"
+        assert config.dimensions == 384
+
+    def test_sentence_transformers_model_sets_known_dimensions(self):
+        """Known sentence-transformer models should infer dimensions when omitted."""
+        config = EmbeddingConfig(
+            provider=EmbeddingProvider.SENTENCE_TRANSFORMERS,
+            model="all-mpnet-base-v2",
+        )
+
+        assert config.dimensions == 768
 
 
 class TestExtractionConfig:

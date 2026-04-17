@@ -107,6 +107,10 @@ the terminal:
 neo4j-agent-memory memory --local-embedder <command> ...
 ```
 
+`--local-embedder` now uses the local `sentence-transformers` path with
+`BAAI/bge-small-en-v1.5`. Use `--hashed-local-embedder` only when you need the
+older deterministic hash-based fallback.
+
 For coding work, the core commands are:
 
 - `session-id`

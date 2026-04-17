@@ -163,8 +163,8 @@ OPENAI_API_KEY=sk-...
 
 |`model`
 |str
-|`text-embedding-3-small`
-|Model name
+|`text-embedding-3-small` or `BAAI/bge-small-en-v1.5`
+|Model name. Defaults to OpenAI small for `OPENAI` and BGE small for `SENTENCE_TRANSFORMERS`
 
 |`api_key`
 |SecretStr
@@ -173,8 +173,8 @@ OPENAI_API_KEY=sk-...
 
 |`dimensions`
 |int
-|1536
-|Embedding dimensions
+|1536 or 384
+|Embedding dimensions. Defaults follow the provider/model when not explicitly set
 
 |`batch_size`
 |int
@@ -223,8 +223,8 @@ OPENAI_API_KEY=sk-...
 |Requires API key
 
 |`SENTENCE_TRANSFORMERS`
-|`all-MiniLM-L6-v2`, `all-mpnet-base-v2`, etc.
-|Runs locally
+|`BAAI/bge-small-en-v1.5` (default), `all-MiniLM-L6-v2`, `all-mpnet-base-v2`, etc.
+|Runs locally. `BAAI/bge-small-en-v1.5` is the recommended V1 default
 
 |`VERTEX_AI`
 |`text-embedding-004`, `textembedding-gecko@003`

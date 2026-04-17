@@ -741,7 +741,13 @@ def stats(format: str, uri: str, user: str, password: str | None):
     "--local-embedder",
     is_flag=True,
     default=False,
-    help="Use the deterministic local hashed embedder for local workflows.",
+    help="Use the local sentence-transformers embedder for local workflows.",
+)
+@click.option(
+    "--hashed-local-embedder",
+    is_flag=True,
+    default=False,
+    help="Force the deterministic hashed local embedder as a fallback local mode.",
 )
 @click.pass_context
 def memory(
@@ -751,14 +757,19 @@ def memory(
     password: str | None,
     database: str,
     local_embedder: bool,
+    hashed_local_embedder: bool,
 ):
     """Operate the three memory layers through a shell-friendly CLI."""
+    if local_embedder and hashed_local_embedder:
+        raise click.UsageError("Choose either --local-embedder or --hashed-local-embedder.")
+
     ctx.obj = MemoryCliConnection(
         uri=uri,
         user=user,
         password=password,
         database=database,
         local_embedder=local_embedder,
+        hashed_local_embedder=hashed_local_embedder,
     )
 
 

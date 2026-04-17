@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import importlib
 import json
+from unittest.mock import patch
+from unittest.mock import AsyncMock
 
 from click.testing import CliRunner
 
 from neo4j_agent_memory.cli.main import cli
+from neo4j_agent_memory.cli.memory_ops import MemoryCliConnection, MemoryCliService
+from neo4j_agent_memory.config.settings import EmbeddingProvider
 
 
 cli_main = importlib.import_module("neo4j_agent_memory.cli.main")
@@ -101,6 +105,7 @@ def test_memory_add_fact_dispatches_to_service(monkeypatch) -> None:
     assert payload["fact"]["id"] == "fact-1"
     assert FakeMemoryCliService.last_connection.password == "secret"
     assert FakeMemoryCliService.last_connection.local_embedder is True
+    assert FakeMemoryCliService.last_connection.hashed_local_embedder is False
     assert FakeMemoryCliService.last_call == (
         "add_fact",
         {
@@ -196,6 +201,94 @@ def test_memory_update_entity_dispatches_to_service(monkeypatch) -> None:
             "metadata_updates": {"scope_kind": "repo"},
         },
     )
+
+
+def test_memory_cli_local_embedder_uses_sentence_transformers() -> None:
+    """The main CLI local embedder should use sentence-transformers."""
+    service = MemoryCliService(
+        MemoryCliConnection(
+            uri="bolt://localhost:7687",
+            user="neo4j",
+            password="secret",
+            database="neo4j",
+            local_embedder=True,
+        )
+    )
+
+    settings = service._build_settings()
+
+    assert settings.embedding.provider == EmbeddingProvider.SENTENCE_TRANSFORMERS
+    assert settings.embedding.model == "BAAI/bge-small-en-v1.5"
+    assert settings.embedding.dimensions == 384
+
+
+def test_memory_cli_hashed_local_embedder_stays_available() -> None:
+    """The deterministic hashed embedder should remain available explicitly."""
+    service = MemoryCliService(
+        MemoryCliConnection(
+            uri="bolt://localhost:7687",
+            user="neo4j",
+            password="secret",
+            database="neo4j",
+            hashed_local_embedder=True,
+        )
+    )
+
+    settings = service._build_settings()
+
+    assert settings.embedding.provider == EmbeddingProvider.CUSTOM
+    assert settings.embedding.model == "local-hashed-overlap"
+    assert settings.embedding.dimensions == 384
+
+
+def test_memory_rejects_conflicting_local_embedder_modes() -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli,
+        [
+            "memory",
+            "--password",
+            "secret",
+            "--local-embedder",
+            "--hashed-local-embedder",
+            "session-id",
+            "--repo",
+            "agent-memory",
+            "--task",
+            "debug extraction",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "Choose either --local-embedder or --hashed-local-embedder" in result.output
+
+
+def test_memory_cli_service_uses_sentence_transformers_embedder() -> None:
+    service = MemoryCliService(
+        MemoryCliConnection(
+            uri="bolt://localhost:7687",
+            user="neo4j",
+            password="secret",
+            database="neo4j",
+            local_embedder=True,
+        )
+    )
+
+    with patch("neo4j_agent_memory.cli.memory_ops.MemoryClient") as mock_client:
+        mock_client.return_value.connect = AsyncMock(return_value=None)
+        mock_client.return_value.close = AsyncMock(return_value=None)
+
+        async def _run():
+            async with service:
+                return None
+
+        import asyncio
+
+        asyncio.run(_run())
+
+    embedder = mock_client.call_args.kwargs["embedder"]
+    assert embedder.__class__.__name__ == "SentenceTransformerEmbedder"
 
 
 def test_memory_alias_entity_dispatches_to_service(monkeypatch) -> None:

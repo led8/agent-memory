@@ -101,6 +101,17 @@ class Neo4jConfig(BaseModel):
 class EmbeddingConfig(BaseModel):
     """Embedding provider configuration."""
 
+    _SENTENCE_TRANSFORMER_DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
+    _SENTENCE_TRANSFORMER_DIMENSIONS = {
+        "BAAI/bge-small-en-v1.5": 384,
+        "all-MiniLM-L6-v2": 384,
+        "all-MiniLM-L12-v2": 384,
+        "all-mpnet-base-v2": 768,
+        "paraphrase-MiniLM-L6-v2": 384,
+        "multi-qa-MiniLM-L6-cos-v1": 384,
+        "all-distilroberta-v1": 768,
+    }
+
     provider: EmbeddingProvider = Field(
         default=EmbeddingProvider.OPENAI, description="Embedding provider to use"
     )
@@ -120,6 +131,17 @@ class EmbeddingConfig(BaseModel):
     # AWS Bedrock specific
     aws_region: str | None = Field(default=None, description="AWS region for Bedrock")
     aws_profile: str | None = Field(default=None, description="AWS credentials profile name")
+
+    def model_post_init(self, __context: Any) -> None:
+        """Apply provider-specific defaults when fields were not explicitly set."""
+        if self.provider != EmbeddingProvider.SENTENCE_TRANSFORMERS:
+            return
+
+        if "model" not in self.model_fields_set:
+            self.model = self._SENTENCE_TRANSFORMER_DEFAULT_MODEL
+
+        if "dimensions" not in self.model_fields_set:
+            self.dimensions = self._SENTENCE_TRANSFORMER_DIMENSIONS.get(self.model, 384)
 
 
 class LLMConfig(BaseModel):

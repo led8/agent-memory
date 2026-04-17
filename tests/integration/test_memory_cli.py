@@ -22,7 +22,7 @@ def _memory_args(neo4j_connection_info: dict[str, str]) -> list[str]:
         neo4j_connection_info["username"],
         "--password",
         neo4j_connection_info["password"],
-        "--local-embedder",
+        "--hashed-local-embedder",
     ]
 
 

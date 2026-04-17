@@ -24,6 +24,7 @@ from neo4j_agent_memory import (
     ToolCallStatus,
     build_coding_session_id,
 )
+from neo4j_agent_memory.embeddings.sentence_transformers import SentenceTransformerEmbedder
 
 
 TOKEN_RE = re.compile(r"[a-z0-9_]+")
@@ -138,6 +139,7 @@ class MemoryCliConnection:
     password: str | None
     database: str
     local_embedder: bool = False
+    hashed_local_embedder: bool = False
 
 
 class MemoryCliService:
@@ -158,6 +160,10 @@ class MemoryCliService:
 
         if self._connection.local_embedder:
             settings.embedding = EmbeddingConfig(
+                provider=EmbeddingProvider.SENTENCE_TRANSFORMERS,
+            )
+        elif self._connection.hashed_local_embedder:
+            settings.embedding = EmbeddingConfig(
                 provider=EmbeddingProvider.CUSTOM,
                 model="local-hashed-overlap",
                 dimensions=384,
@@ -169,7 +175,12 @@ class MemoryCliService:
         if not self._connection.password:
             raise ValueError("Neo4j password required. Set NEO4J_PASSWORD or use --password.")
 
-        embedder = LocalHashedEmbedder(dimensions=384) if self._connection.local_embedder else None
+        embedder = None
+        if self._connection.local_embedder:
+            embedder = SentenceTransformerEmbedder()
+        elif self._connection.hashed_local_embedder:
+            embedder = LocalHashedEmbedder(dimensions=384)
+
         self._client = MemoryClient(self._build_settings(), embedder=embedder)
         await self._client.connect()
         return self
