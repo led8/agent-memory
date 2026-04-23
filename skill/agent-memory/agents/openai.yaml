@@ -1,4 +1,0 @@
-interface:
-  display_name: "Agent Memory skill"
-  short_description: "Comprehensive memory system for AI agents using Neo4j"
-  default_prompt: "Use $agent-memory to manage task-scoped sessions, reviewed long-term memory writes, and reasoning traces."
