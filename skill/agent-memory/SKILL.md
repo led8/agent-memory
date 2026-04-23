@@ -19,6 +19,7 @@ description: Use local shell commands to operate Neo4j Agent Memory for coding-a
 10. Reuse exact same-name same-type entities first. Let resolution and deduplication handle fuzzy variants.
 11. Use `update-entity` for same-identity corrections, `alias-entity` for alternate names, and `merge-entity` for duplicate nodes that represent the same real thing.
 12. Do not emulate entity edits with delete and re-add unless the old entry is clearly wrong and should be cleaned up.
+13. Never inline a literal Neo4j password in commands and never reuse a stale approved command that does. Load credentials from the current repo environment at execution time.
 
 ## Command Surface
 
@@ -33,6 +34,10 @@ Connection can come from shell configuration or explicit flags on the `memory` g
 - `--user`
 - `--password`
 - `--database`
+
+Prefer loading credentials from the current repo environment at execution time.
+Do not hardcode `NEO4J_PASSWORD=...` in example commands or reuse an old
+approved command that inlines a stale password.
 
 Use `--local-embedder` for the best local coding workflow. It uses the local
 `sentence-transformers` provider with `BAAI/bge-small-en-v1.5`.
@@ -115,22 +120,27 @@ This layer is curated. In V1 it is review-first, not automatic.
 Start Neo4j:
 
 ```bash
-docker compose -f docker-compose.test.yml up -d
+docker compose -f docker-compose.yml up -d
 ```
 
-If the repo provides a local `.env.test` and `docker-compose.test.yml` reads
-`NEO4J_TEST_PASSWORD`, preload the shell for memory commands with:
+Preload Neo4j auth from the repo `.env` file. Never inline a literal password
+such as `NEO4J_PASSWORD=test-password`.
 
 ```bash
-set -a; source .env.test; set +a; NEO4J_PASSWORD="$NEO4J_TEST_PASSWORD"
+set -a
+if [ -f .env ]; then
+  source .env
+fi
+set +a
 ```
 
-Use this prefix only for repos that actually follow that test-password pattern.
+Use `.env` as the local default. If `.env` is absent, rely on the current shell
+environment or pass `--password` explicitly as a last resort.
 
 Build a task-scoped session:
 
 ```bash
-set -a; source .env.test; set +a; NEO4J_PASSWORD="$NEO4J_TEST_PASSWORD" \
+set -a; if [ -f .env ]; then source .env; fi; set +a; \
   neo4j-agent-memory memory --local-embedder session-id \
   --repo agent-memory \
   --task "debug extraction"
@@ -141,7 +151,7 @@ The returned `session_id` is the handle for the active coding task.
 Assemble startup recall for that task:
 
 ```bash
-set -a; source .env.test; set +a; NEO4J_PASSWORD="$NEO4J_TEST_PASSWORD" \
+set -a; if [ -f .env ]; then source .env; fi; set +a; \
   neo4j-agent-memory memory --local-embedder recall \
   --repo agent-memory \
   --task "debug extraction" \

@@ -1,11 +1,11 @@
 .PHONY: help install install-all install-dev lint format typecheck test test-unit test-integration test-integration-mcp test-e2e test-all test-docker test-ci test-no-docker test-quick test-file test-match test-aws coverage coverage-all coverage-ci coverage-mcp test-examples test-examples-quick test-examples-no-neo4j test-docs test-docs-syntax test-docs-build test-docs-links neo4j-start neo4j-stop neo4j-logs clean build publish docs docs-diagrams-list docs-diagrams-status docs-diagrams-missing docs-diagrams-manifest docs-diagrams-add-refs docs-diagrams-generate example-basic example-resolution example-langchain example-pydantic examples chat-agent-install chat-agent-backend chat-agent-frontend chat-agent
 
--include .env.test
-export NEO4J_TEST_PASSWORD
+-include .env
+export NEO4J_PASSWORD
 
-define require_neo4j_test_password
-	@if [ -z "$(NEO4J_TEST_PASSWORD)" ]; then \
-		echo "Missing NEO4J_TEST_PASSWORD. Copy .env.test.example to .env.test and set a local test password."; \
+define require_neo4j_password
+	@if [ -z "$(NEO4J_PASSWORD)" ]; then \
+		echo "Missing NEO4J_PASSWORD. Set it in .env for the local Neo4j workflow."; \
 		exit 1; \
 	fi
 endef
@@ -158,17 +158,17 @@ test-all:
 
 # Run all tests with explicit docker-compose Neo4j (useful if testcontainers has issues)
 test-docker: neo4j-start neo4j-wait
-	NEO4J_URI=bolt://localhost:7687 NEO4J_USERNAME=neo4j NEO4J_PASSWORD=$(NEO4J_TEST_PASSWORD) \
+	NEO4J_URI=bolt://localhost:7687 NEO4J_USERNAME=neo4j NEO4J_PASSWORD=$(NEO4J_PASSWORD) \
 		uv run pytest tests -v --timeout=300
 
 # Run tests as they would run in CI (with environment variables)
 test-ci:
 	@echo "Running tests in CI mode with docker-compose Neo4j..."
-	@docker compose -f docker-compose.test.yml up -d
+	@docker compose -f docker-compose.yml up -d
 	@$(MAKE) neo4j-wait-quiet
-	NEO4J_URI=bolt://localhost:7687 NEO4J_USERNAME=neo4j NEO4J_PASSWORD=$(NEO4J_TEST_PASSWORD) \
+	NEO4J_URI=bolt://localhost:7687 NEO4J_USERNAME=neo4j NEO4J_PASSWORD=$(NEO4J_PASSWORD) \
 		uv run pytest tests -v --timeout=300
-	@docker compose -f docker-compose.test.yml down
+	@docker compose -f docker-compose.yml down
 
 # Run tests without integration tests (useful when Docker is not available)
 test-no-docker:
@@ -207,11 +207,11 @@ coverage-all:
 
 # Coverage report for CI (with docker-compose Neo4j)
 coverage-ci:
-	@docker compose -f docker-compose.test.yml up -d
+	@docker compose -f docker-compose.yml up -d
 	@$(MAKE) neo4j-wait-quiet
-	NEO4J_URI=bolt://localhost:7687 NEO4J_USERNAME=neo4j NEO4J_PASSWORD=$(NEO4J_TEST_PASSWORD) \
+	NEO4J_URI=bolt://localhost:7687 NEO4J_USERNAME=neo4j NEO4J_PASSWORD=$(NEO4J_PASSWORD) \
 		uv run pytest tests --cov=src/neo4j_agent_memory --cov-report=term-missing --cov-report=xml --timeout=300
-	@docker compose -f docker-compose.test.yml down
+	@docker compose -f docker-compose.yml down
 
 # =============================================================================
 # Example Testing
@@ -236,17 +236,17 @@ test-examples-no-neo4j:
 
 # Run example tests with docker-compose Neo4j (alternative to testcontainers)
 test-examples-docker: neo4j-start neo4j-wait
-	NEO4J_URI=bolt://localhost:7687 NEO4J_USERNAME=neo4j NEO4J_PASSWORD=$(NEO4J_TEST_PASSWORD) \
+	NEO4J_URI=bolt://localhost:7687 NEO4J_USERNAME=neo4j NEO4J_PASSWORD=$(NEO4J_PASSWORD) \
 		uv run pytest tests/examples -v --timeout=120
 
 # Run example tests in CI mode
 test-examples-ci:
 	@echo "Running example tests in CI mode..."
-	@docker compose -f docker-compose.test.yml up -d
+	@docker compose -f docker-compose.yml up -d
 	@$(MAKE) neo4j-wait-quiet
-	NEO4J_URI=bolt://localhost:7687 NEO4J_USERNAME=neo4j NEO4J_PASSWORD=$(NEO4J_TEST_PASSWORD) \
+	NEO4J_URI=bolt://localhost:7687 NEO4J_USERNAME=neo4j NEO4J_PASSWORD=$(NEO4J_PASSWORD) \
 		uv run pytest tests/examples -v --timeout=120
-	@docker compose -f docker-compose.test.yml down
+	@docker compose -f docker-compose.yml down
 
 # =============================================================================
 # Documentation Testing
@@ -285,10 +285,10 @@ test-docs-integration:
 # Neo4j Docker Management
 # =============================================================================
 
-NEO4J_COMPOSE := docker compose -f docker-compose.test.yml
+NEO4J_COMPOSE := docker compose -f docker-compose.yml
 
 neo4j-start:
-	$(call require_neo4j_test_password)
+	$(call require_neo4j_password)
 	$(NEO4J_COMPOSE) up -d
 	@echo "Neo4j starting... use 'make neo4j-wait' to wait for it to be ready"
 
@@ -304,11 +304,11 @@ neo4j-status:
 	@$(NEO4J_COMPOSE) ps
 
 neo4j-wait:
-	$(call require_neo4j_test_password)
+	$(call require_neo4j_password)
 	@echo "Waiting for Neo4j to be ready..."
 	@$(NEO4J_COMPOSE) up -d
 	@for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do \
-		if $(NEO4J_COMPOSE) exec -T neo4j cypher-shell -u neo4j -p "$(NEO4J_TEST_PASSWORD)" "RETURN 1" > /dev/null 2>&1; then \
+		if $(NEO4J_COMPOSE) exec -T neo4j cypher-shell -u neo4j -p "$(NEO4J_PASSWORD)" "RETURN 1" > /dev/null 2>&1; then \
 			echo "Neo4j is ready!"; \
 			exit 0; \
 		fi; \
@@ -320,9 +320,9 @@ neo4j-wait:
 
 # Quiet version for internal use
 neo4j-wait-quiet:
-	$(call require_neo4j_test_password)
+	$(call require_neo4j_password)
 	@for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do \
-		if $(NEO4J_COMPOSE) exec -T neo4j cypher-shell -u neo4j -p "$(NEO4J_TEST_PASSWORD)" "RETURN 1" > /dev/null 2>&1; then \
+		if $(NEO4J_COMPOSE) exec -T neo4j cypher-shell -u neo4j -p "$(NEO4J_PASSWORD)" "RETURN 1" > /dev/null 2>&1; then \
 			exit 0; \
 		fi; \
 		sleep 2; \
@@ -335,8 +335,8 @@ neo4j-clean:
 	@echo "Neo4j container and volumes removed"
 
 neo4j-shell:
-	$(call require_neo4j_test_password)
-	$(NEO4J_COMPOSE) exec neo4j cypher-shell -u neo4j -p "$(NEO4J_TEST_PASSWORD)"
+	$(call require_neo4j_password)
+	$(NEO4J_COMPOSE) exec neo4j cypher-shell -u neo4j -p "$(NEO4J_PASSWORD)"
 
 # =============================================================================
 # Build & Publish
@@ -476,7 +476,7 @@ define check_neo4j_env
 	if [ -z "$$NEO4J_URI" ]; then \
 		echo "NEO4J_URI not set, starting Docker Neo4j..."; \
 		$(MAKE) neo4j-start neo4j-wait-quiet; \
-		export NEO4J_PASSWORD=$(NEO4J_TEST_PASSWORD); \
+		export NEO4J_PASSWORD=$(NEO4J_PASSWORD); \
 	else \
 		echo "Using configured Neo4j at $$NEO4J_URI"; \
 	fi
@@ -491,7 +491,7 @@ example-basic:
 	if [ -z "$$NEO4J_URI" ]; then \
 		echo "NEO4J_URI not set, starting Docker Neo4j..."; \
 		$(MAKE) neo4j-start neo4j-wait-quiet; \
-		NEO4J_PASSWORD=$(NEO4J_TEST_PASSWORD) uv run python examples/basic_usage.py; \
+		NEO4J_PASSWORD=$(NEO4J_PASSWORD) uv run python examples/basic_usage.py; \
 	else \
 		echo "Using configured Neo4j at $$NEO4J_URI"; \
 		uv run python examples/basic_usage.py; \
@@ -511,7 +511,7 @@ example-langchain:
 	if [ -z "$$NEO4J_URI" ]; then \
 		echo "NEO4J_URI not set, starting Docker Neo4j..."; \
 		$(MAKE) neo4j-start neo4j-wait-quiet; \
-		NEO4J_PASSWORD=$(NEO4J_TEST_PASSWORD) uv run python examples/langchain_agent.py; \
+		NEO4J_PASSWORD=$(NEO4J_PASSWORD) uv run python examples/langchain_agent.py; \
 	else \
 		echo "Using configured Neo4j at $$NEO4J_URI"; \
 		uv run python examples/langchain_agent.py; \
@@ -526,7 +526,7 @@ example-pydantic:
 	if [ -z "$$NEO4J_URI" ]; then \
 		echo "NEO4J_URI not set, starting Docker Neo4j..."; \
 		$(MAKE) neo4j-start neo4j-wait-quiet; \
-		NEO4J_PASSWORD=$(NEO4J_TEST_PASSWORD) uv run python examples/pydantic_ai_agent.py; \
+		NEO4J_PASSWORD=$(NEO4J_PASSWORD) uv run python examples/pydantic_ai_agent.py; \
 	else \
 		echo "Using configured Neo4j at $$NEO4J_URI"; \
 		uv run python examples/pydantic_ai_agent.py; \

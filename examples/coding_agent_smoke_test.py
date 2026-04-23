@@ -173,7 +173,7 @@ async def main() -> None:
         await memory.reasoning.record_tool_call(
             step.id,
             tool_name="docker compose",
-            arguments={"service": "neo4j", "file": "docker-compose.test.yml"},
+            arguments={"service": "neo4j", "file": "docker-compose.yml"},
             result={"status": "ready"},
             status=ToolCallStatus.SUCCESS,
             duration_ms=100,

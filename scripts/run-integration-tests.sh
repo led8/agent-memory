@@ -8,14 +8,14 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 cd "$PROJECT_DIR"
 
-if [ -f .env.test ]; then
+if [ -f .env ]; then
     set -a
-    . ./.env.test
+    . ./.env
     set +a
 fi
 
-if [ -z "${NEO4J_TEST_PASSWORD:-}" ]; then
-    echo "Error: NEO4J_TEST_PASSWORD is not set. Copy .env.test.example to .env.test and set a local test password."
+if [ -z "${NEO4J_PASSWORD:-}" ]; then
+    echo "Error: NEO4J_PASSWORD is not set. Create .env and set the local Neo4j password."
     exit 1
 fi
 
@@ -38,7 +38,7 @@ fi
 cleanup() {
     echo ""
     echo "Stopping Neo4j container..."
-    docker compose -f docker-compose.test.yml down -v 2>/dev/null || true
+    docker compose -f docker-compose.yml down -v 2>/dev/null || true
 }
 
 # Parse arguments
@@ -84,14 +84,14 @@ fi
 
 # Start Neo4j
 echo "Starting Neo4j container..."
-docker compose -f docker-compose.test.yml up -d
+docker compose -f docker-compose.yml up -d
 
 # Wait for Neo4j to be ready
 echo "Waiting for Neo4j to be ready..."
 for i in {1..60}; do
     if curl -s http://localhost:7474 > /dev/null 2>&1; then
         # Try a Cypher query to ensure it's fully ready
-        if docker exec neo4j-agent-memory-test cypher-shell -u neo4j -p "$NEO4J_TEST_PASSWORD" "RETURN 1" > /dev/null 2>&1; then
+        if docker exec neo4j-agent-memory-test cypher-shell -u neo4j -p "$NEO4J_PASSWORD" "RETURN 1" > /dev/null 2>&1; then
             echo "Neo4j is ready!"
             break
         fi
@@ -127,7 +127,7 @@ PYTEST_CMD="$PYTEST_CMD --tb=short"
 export RUN_INTEGRATION_TESTS=1
 export NEO4J_URI=bolt://localhost:7687
 export NEO4J_USERNAME=neo4j
-export NEO4J_PASSWORD="$NEO4J_TEST_PASSWORD"
+export NEO4J_PASSWORD
 
 eval $PYTEST_CMD
 
@@ -137,5 +137,5 @@ echo "=== Integration tests completed ==="
 if [ "$KEEP_RUNNING" = true ]; then
     echo ""
     echo "Neo4j container is still running."
-    echo "To stop it: docker compose -f docker-compose.test.yml down -v"
+    echo "To stop it: docker compose -f docker-compose.yml down -v"
 fi

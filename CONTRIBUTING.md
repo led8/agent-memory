@@ -90,7 +90,7 @@ Key variables:
 make example-basic
 
 # Or without examples/.env (auto-starts Docker Neo4j)
-# First copy .env.test.example to .env.test and set NEO4J_TEST_PASSWORD
+# Set NEO4J_PASSWORD in the repo .env file first
 rm examples/.env  # Ensure no .env file
 make example-basic
 ```

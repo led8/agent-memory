@@ -6,11 +6,11 @@ unless the RUN_INTEGRATION_TESTS environment variable is set.
 To run integration tests locally:
 
 1. Start Neo4j using Docker:
-   docker compose -f docker-compose.test.yml up -d
+   docker compose -f docker-compose.yml up -d
 
 2. Run tests with the environment variable:
    RUN_INTEGRATION_TESTS=1 uv run pytest tests/integration -v
 
 3. Stop Neo4j when done:
-   docker compose -f docker-compose.test.yml down -v
+   docker compose -f docker-compose.yml down -v
 """

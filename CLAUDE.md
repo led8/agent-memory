@@ -1859,7 +1859,7 @@ Key variables:
 - `NEO4J_PASSWORD` - Neo4j password for your chosen instance
 - `OPENAI_API_KEY` - Required for OpenAI embeddings and LLM extraction
 
-If `NEO4J_URI` is not set, the Makefile targets will automatically start the Docker Neo4j container using `NEO4J_TEST_PASSWORD` from `.env.test`.
+If `NEO4J_URI` is not set, the Makefile targets will automatically start the Docker Neo4j container using `NEO4J_PASSWORD` from `.env`.
 
 ## Full-Stack Chat Agent Example
 
