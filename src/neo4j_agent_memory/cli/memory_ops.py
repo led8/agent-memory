@@ -649,6 +649,7 @@ class MemoryCliService:
         max_facts: int = 5,
         max_entities: int = 5,
         max_traces: int = 3,
+        include_provenance: bool = False,
     ) -> dict[str, Any]:
         coding_memory = self._coding_memory(repo=repo, task=task, session_id=session_id)
         context = await coding_memory.get_startup_recall(
@@ -658,6 +659,7 @@ class MemoryCliService:
             max_facts=max_facts,
             max_entities=max_entities,
             max_traces=max_traces,
+            include_provenance=include_provenance,
         )
         return {
             "repo": repo,
@@ -680,3 +682,84 @@ class MemoryCliService:
         label = label_map[kind]
         deleted = await self.client.graph.delete_node_by_id(label, entry_id)
         return {"kind": kind, "id": entry_id, "deleted": deleted}
+
+    # =========================================================================
+    # V2 Candidate Operations
+    # =========================================================================
+
+    async def list_candidates(
+        self,
+        *,
+        status: str | None = None,
+        candidate_type: str | None = None,
+        scope_kind: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        candidates = await self.client.long_term.list_candidates(
+            status=status,
+            candidate_type=candidate_type,
+            scope_kind=scope_kind,
+            limit=limit,
+        )
+        return {"candidates": [to_jsonable(c) for c in candidates], "count": len(candidates)}
+
+    async def accept_candidate(self, candidate_id: str) -> dict[str, Any]:
+        result = await self.client.long_term.accept_candidate(candidate_id)
+        if result is None:
+            return {"error": "candidate not found", "id": candidate_id}
+        return {"status": "accepted", "candidate": to_jsonable(result)}
+
+    async def ignore_candidate(self, candidate_id: str) -> dict[str, Any]:
+        result = await self.client.long_term.ignore_candidate(candidate_id)
+        if result is None:
+            return {"error": "candidate not found", "id": candidate_id}
+        return {"status": "ignored", "candidate": to_jsonable(result)}
+
+    async def get_candidate(self, candidate_id: str) -> dict[str, Any]:
+        result = await self.client.long_term.get_candidate(candidate_id)
+        if result is None:
+            return {"error": "candidate not found", "id": candidate_id}
+        return {"candidate": to_jsonable(result)}
+
+    # =========================================================================
+    # V2 Relation Review & Provenance Operations
+    # =========================================================================
+
+    async def list_pending_relations(self, *, limit: int = 50) -> dict[str, Any]:
+        relations = await self.client.long_term.list_pending_relations(limit=limit)
+        return {"relations": [to_jsonable(r) for r in relations], "count": len(relations)}
+
+    async def review_relation(
+        self,
+        source_id: str,
+        target_id: str,
+        relation_type: str,
+        *,
+        accept: bool = True,
+        reviewed_by: str | None = None,
+    ) -> dict[str, Any]:
+        result = await self.client.long_term.review_relation(
+            source_id, target_id, relation_type, accept=accept, reviewed_by=reviewed_by
+        )
+        if result is None:
+            return {"error": "relation not found", "source_id": source_id, "target_id": target_id}
+        return result
+
+    async def get_relation_provenance(
+        self, source_id: str, target_id: str, relation_type: str
+    ) -> dict[str, Any]:
+        result = await self.client.long_term.get_relation_provenance(source_id, target_id, relation_type)
+        if result is None:
+            return {"error": "relation not found", "source_id": source_id, "target_id": target_id}
+        return to_jsonable(result)
+
+    async def get_provenance(self, kind: str, entry_id: str) -> dict[str, Any]:
+        if kind == "fact":
+            result = await self.client.long_term.get_fact_provenance(entry_id)
+        elif kind == "preference":
+            result = await self.client.long_term.get_preference_provenance(entry_id)
+        else:
+            return {"error": f"unsupported kind: {kind}"}
+        if result is None:
+            return {"error": f"{kind} not found", "id": entry_id}
+        return to_jsonable(result)

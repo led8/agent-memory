@@ -379,5 +379,6 @@ def test_memory_recall_dispatches_to_service(monkeypatch) -> None:
             "max_facts": 5,
             "max_entities": 5,
             "max_traces": 3,
+            "include_provenance": False,
         },
     )

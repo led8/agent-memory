@@ -1368,6 +1368,7 @@ def memory_get_context(
 @click.option("--max-facts", type=int, default=5, help="Maximum durable facts.")
 @click.option("--max-entities", type=int, default=5, help="Maximum relevant entities.")
 @click.option("--max-traces", type=int, default=3, help="Maximum similar past tasks.")
+@click.option("--include-provenance", is_flag=True, default=False, help="Annotate facts/preferences with evidence source.")
 @click.pass_obj
 def memory_recall(
     connection: MemoryCliConnection,
@@ -1380,6 +1381,7 @@ def memory_recall(
     max_facts: int,
     max_entities: int,
     max_traces: int,
+    include_provenance: bool,
 ):
     """Assemble coding-oriented startup recall for one task session."""
     payload = run_memory_operation(
@@ -1394,6 +1396,7 @@ def memory_recall(
             max_facts=max_facts,
             max_entities=max_entities,
             max_traces=max_traces,
+            include_provenance=include_provenance,
         ),
     )
     echo_json(payload)
@@ -1406,6 +1409,101 @@ def memory_recall(
 def memory_delete(connection: MemoryCliConnection, kind: str, entry_id: str):
     """Delete one memory entry by UUID."""
     echo_json(run_memory_operation(connection, lambda service: service.delete(kind=kind, entry_id=entry_id)))
+
+
+@memory.command("list-candidates")
+@click.option("--status", type=click.Choice(["proposed", "accepted", "ignored", "expired"]), default=None)
+@click.option("--type", "candidate_type", type=click.Choice(["fact", "preference", "entity"]), default=None)
+@click.option("--scope", "scope_kind", type=click.Choice(["repo", "personal"]), default=None)
+@click.option("--limit", type=int, default=50)
+@click.pass_obj
+def memory_list_candidates(connection: MemoryCliConnection, status, candidate_type, scope_kind, limit):
+    """List long-term memory candidates pending review."""
+    echo_json(run_memory_operation(
+        connection,
+        lambda service: service.list_candidates(
+            status=status, candidate_type=candidate_type, scope_kind=scope_kind, limit=limit
+        ),
+    ))
+
+
+@memory.command("accept-candidate")
+@click.option("--id", "candidate_id", required=True, help="Candidate UUID.")
+@click.pass_obj
+def memory_accept_candidate(connection: MemoryCliConnection, candidate_id: str):
+    """Accept a candidate and mark it for persistence."""
+    echo_json(run_memory_operation(connection, lambda service: service.accept_candidate(candidate_id)))
+
+
+@memory.command("ignore-candidate")
+@click.option("--id", "candidate_id", required=True, help="Candidate UUID.")
+@click.pass_obj
+def memory_ignore_candidate(connection: MemoryCliConnection, candidate_id: str):
+    """Ignore a candidate (mark as not worth persisting)."""
+    echo_json(run_memory_operation(connection, lambda service: service.ignore_candidate(candidate_id)))
+
+
+@memory.command("get-candidate")
+@click.option("--id", "candidate_id", required=True, help="Candidate UUID.")
+@click.pass_obj
+def memory_get_candidate(connection: MemoryCliConnection, candidate_id: str):
+    """Inspect a single candidate by UUID."""
+    echo_json(run_memory_operation(connection, lambda service: service.get_candidate(candidate_id)))
+
+
+# =========================================================================
+# V2 Relation Review CLI
+# =========================================================================
+
+
+@memory.command("list-pending-relations")
+@click.option("--limit", default=50, help="Max relations to return.")
+@click.pass_obj
+def memory_list_pending_relations(connection: MemoryCliConnection, limit: int):
+    """List RELATED_TO relationships awaiting review."""
+    echo_json(run_memory_operation(connection, lambda service: service.list_pending_relations(limit=limit)))
+
+
+@memory.command("review-relation")
+@click.argument("source_id")
+@click.argument("target_id")
+@click.argument("relation_type")
+@click.option("--accept/--reject", default=True, help="Accept or reject the relation.")
+@click.option("--reviewed-by", default=None, help="Reviewer identifier.")
+@click.pass_obj
+def memory_review_relation(connection: MemoryCliConnection, source_id: str, target_id: str, relation_type: str, accept: bool, reviewed_by: str | None):
+    """Review (accept or reject) a pending relation."""
+    echo_json(run_memory_operation(
+        connection,
+        lambda service: service.review_relation(source_id, target_id, relation_type, accept=accept, reviewed_by=reviewed_by),
+    ))
+
+
+@memory.command("get-provenance")
+@click.argument("kind", type=click.Choice(["fact", "preference", "relation"]))
+@click.argument("entry_id_or_args", nargs=-1, required=True)
+@click.pass_obj
+def memory_get_provenance(connection: MemoryCliConnection, kind: str, entry_id_or_args: tuple):
+    """Get provenance for a fact, preference, or relation.
+
+    For fact/preference: get-provenance fact <ID>
+
+    For relation: get-provenance relation <SOURCE_ID> <TARGET_ID> <RELATION_TYPE>
+    """
+    if kind == "relation":
+        if len(entry_id_or_args) < 3:
+            raise click.UsageError("relation provenance requires: SOURCE_ID TARGET_ID RELATION_TYPE")
+        source_id, target_id, relation_type = entry_id_or_args[0], entry_id_or_args[1], entry_id_or_args[2]
+        echo_json(run_memory_operation(
+            connection,
+            lambda service: service.get_relation_provenance(source_id, target_id, relation_type),
+        ))
+    else:
+        entry_id = entry_id_or_args[0]
+        echo_json(run_memory_operation(
+            connection,
+            lambda service: service.get_provenance(kind, entry_id),
+        ))
 
 
 @cli.group()

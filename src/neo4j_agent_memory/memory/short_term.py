@@ -956,7 +956,14 @@ class ShortTermMemory(BaseMemory[Message]):
                 # Store extracted relations
                 if extract_relations and extraction_result.relations:
                     stored = await self._store_relations(
-                        extraction_result.relations, entity_name_to_id
+                        extraction_result.relations,
+                        entity_name_to_id,
+                        source_message_id=message_id,
+                        extractor_name=(
+                            self._extractor.__class__.__name__
+                            if self._extractor
+                            else None
+                        ),
                     )
                     relations_extracted += stored
 
@@ -1093,12 +1100,23 @@ class ShortTermMemory(BaseMemory[Message]):
 
         # Store extracted relations
         if extract_relations and result.relations:
-            await self._store_relations(result.relations, entity_name_to_id)
+            await self._store_relations(
+                result.relations,
+                entity_name_to_id,
+                source_message_id=str(message.id),
+                extractor_name=(
+                    self._extractor.__class__.__name__ if self._extractor else None
+                ),
+            )
 
     async def _store_relations(
         self,
         relations: list,
         entity_name_to_id: dict[str, str],
+        *,
+        source_message_id: str | None = None,
+        extractor_name: str | None = None,
+        min_confidence: float = 0.0,
     ) -> int:
         """Store extracted relations as RELATED_TO relationships between entities.
 
@@ -1109,6 +1127,9 @@ class ShortTermMemory(BaseMemory[Message]):
         Args:
             relations: List of ExtractedRelation objects from the extractor
             entity_name_to_id: Mapping of lowercase entity names to their IDs
+            source_message_id: ID of the message that triggered extraction
+            extractor_name: Name of the extractor that produced the relations
+            min_confidence: Threshold below which relations get 'pending_review' status
 
         Returns:
             Number of relations successfully stored
@@ -1134,6 +1155,9 @@ class ShortTermMemory(BaseMemory[Message]):
                         "target_id": target_id,
                         "relation_type": relation.relation_type,
                         "confidence": relation.confidence,
+                        "min_confidence": min_confidence,
+                        "source_message_id": source_message_id,
+                        "extractor_name": extractor_name,
                     },
                 )
                 stored_count += 1
@@ -1146,6 +1170,9 @@ class ShortTermMemory(BaseMemory[Message]):
                         "target_name": relation.target,
                         "relation_type": relation.relation_type,
                         "confidence": relation.confidence,
+                        "min_confidence": min_confidence,
+                        "source_message_id": source_message_id,
+                        "extractor_name": extractor_name,
                     },
                 )
                 if result:

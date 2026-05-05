@@ -34,6 +34,15 @@ def mock_memory_client() -> MagicMock:
     client.long_term.update_fact_metadata = AsyncMock()
     client.long_term.link_preference_supersession = AsyncMock(return_value=True)
     client.long_term.link_fact_supersession = AsyncMock(return_value=True)
+    # V2 provenance mocks
+    client.long_term.link_fact_to_evidence = AsyncMock(return_value=True)
+    client.long_term.link_preference_to_evidence = AsyncMock(return_value=True)
+    client.long_term.auto_link_fact_to_entities = AsyncMock(return_value=[])
+    # V2 reasoning-to-durable mocks
+    client.reasoning.link_trace_to_outcome = AsyncMock(return_value=True)
+    # V2 candidate mocks
+    client.long_term.store_candidate = AsyncMock(return_value={"id": "cand-123", "status": "proposed"})
+    client.long_term.accept_candidate = AsyncMock(return_value={"id": "cand-123", "status": "accepted"})
     client.get_context = AsyncMock(return_value="context")
     client.reasoning.get_session_traces = AsyncMock(return_value=[])
     client.reasoning.get_trace = AsyncMock(return_value=None)
@@ -460,7 +469,8 @@ async def test_get_startup_recall_falls_back_to_session_reasoning_when_similarit
     mock_memory_client.reasoning.get_trace.assert_awaited_once_with(trace_id)
 
 
-def test_propose_preference_candidate_marks_explicit_user_input_as_high_confidence(
+@pytest.mark.asyncio
+async def test_propose_preference_candidate_marks_explicit_user_input_as_high_confidence(
     mock_memory_client: MagicMock,
 ) -> None:
     """Explicit durable preferences should become high-confidence review candidates."""
@@ -470,7 +480,7 @@ def test_propose_preference_candidate_marks_explicit_user_input_as_high_confiden
         task="policy review",
     )
 
-    candidate = memory.propose_preference_candidate(
+    candidate = await memory.propose_preference_candidate(
         category="workflow",
         preference="Use one session_id per active coding task",
         context="Coding-agent integration",
@@ -489,7 +499,8 @@ def test_propose_preference_candidate_marks_explicit_user_input_as_high_confiden
     assert candidate.payload["metadata"]["candidate_source"] == "user_explicit"
 
 
-def test_propose_fact_candidate_returns_none_when_not_durable(
+@pytest.mark.asyncio
+async def test_propose_fact_candidate_returns_none_when_not_durable(
     mock_memory_client: MagicMock,
 ) -> None:
     """Low-confidence facts should not become long-term review candidates."""
@@ -499,7 +510,7 @@ def test_propose_fact_candidate_returns_none_when_not_durable(
         task="policy review",
     )
 
-    candidate = memory.propose_fact_candidate(
+    candidate = await memory.propose_fact_candidate(
         subject="Temporary debug note",
         predicate="status",
         obj="only relevant for this session",
@@ -525,7 +536,7 @@ async def test_remember_candidate_persists_high_confidence_fact(
         task="policy review",
     )
 
-    candidate = memory.propose_fact_candidate(
+    candidate = await memory.propose_fact_candidate(
         subject="Short-term extraction",
         predicate="linking_rule",
         obj="must use persisted entity id returned after Neo4j MERGE",
@@ -554,7 +565,7 @@ async def test_remember_candidate_rejects_medium_confidence_without_override(
         task="policy review",
     )
 
-    candidate = memory.propose_entity_candidate(
+    candidate = await memory.propose_entity_candidate(
         name="GLiNER",
         entity_type="TECHNOLOGY",
         source=LongTermCandidateSource.RUN_OBSERVATION,
@@ -580,7 +591,7 @@ async def test_remember_candidate_allows_medium_confidence_with_override(
         task="policy review",
     )
 
-    candidate = memory.propose_preference_candidate(
+    candidate = await memory.propose_preference_candidate(
         category="workflow",
         preference="Prefer GLiNER for local extraction during early integration",
         context="Observed during phase-1 setup",
