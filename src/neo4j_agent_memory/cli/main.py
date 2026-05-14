@@ -309,23 +309,20 @@ def extract(
         # Configure extractor type
         if extractor == "gliner":
             if model:
-                builder = builder.with_gliner(model_name=model)
+                builder = builder.with_gliner(model=model)
             else:
                 builder = builder.with_gliner()
         elif extractor == "llm":
             if model:
-                builder = builder.with_llm(model=model)
+                builder = builder.with_llm_fallback(model=model)
             else:
-                builder = builder.with_llm()
+                builder = builder.with_llm_fallback()
         elif extractor == "hybrid":
             builder = builder.with_gliner()
             if model:
-                builder = builder.with_llm(model=model)
+                builder = builder.with_llm_fallback(model=model)
             else:
-                builder = builder.with_llm()
-
-        # Set confidence threshold
-        builder = builder.with_confidence_threshold(confidence_threshold)
+                builder = builder.with_llm_fallback()
 
         ext = builder.build()
 
@@ -335,6 +332,27 @@ def extract(
             extract_relations=relations,
             extract_preferences=preferences,
         )
+
+        # Apply post-extraction confidence filter. We do this here rather
+        # than wiring a builder method because confidence semantics differ
+        # between extractors (GLiNER threshold filters during inference,
+        # spaCy/LLM emit confidence on the result). A uniform post-filter
+        # gives the user a single, predictable knob.
+        if confidence_threshold > 0:
+            result.entities = [
+                e for e in result.entities
+                if e.confidence >= confidence_threshold
+            ]
+            if result.relations:
+                result.relations = [
+                    r for r in result.relations
+                    if r.confidence >= confidence_threshold
+                ]
+            if result.preferences:
+                result.preferences = [
+                    p for p in result.preferences
+                    if p.confidence >= confidence_threshold
+                ]
 
         return result
 
@@ -460,17 +478,19 @@ def schemas_list(format: str, uri: str, user: str, password: str | None):
         )
         sys.exit(1)
 
-    from neo4j import AsyncGraphDatabase
-
+    from neo4j_agent_memory.config.settings import Neo4jConfig
+    from neo4j_agent_memory.graph.client import Neo4jClient
     from neo4j_agent_memory.schema import SchemaManager
 
     async def do_list():
-        driver = AsyncGraphDatabase.driver(uri, auth=(user, password))
+        config = Neo4jConfig(uri=uri, username=user, password=password)
+        client = Neo4jClient(config)
+        await client.connect()
         try:
-            manager = SchemaManager(driver)
+            manager = SchemaManager(client)
             return await manager.list_schemas()
         finally:
-            await driver.close()
+            await client.close()
 
     try:
         schema_list = run_async(do_list())
@@ -555,19 +575,21 @@ def schemas_show(
         error_console.print("[red]Error:[/red] Neo4j password required.")
         sys.exit(1)
 
-    from neo4j import AsyncGraphDatabase
-
+    from neo4j_agent_memory.config.settings import Neo4jConfig
+    from neo4j_agent_memory.graph.client import Neo4jClient
     from neo4j_agent_memory.schema import SchemaManager
 
     async def do_show():
-        driver = AsyncGraphDatabase.driver(uri, auth=(user, password))
+        config = Neo4jConfig(uri=uri, username=user, password=password)
+        client = Neo4jClient(config)
+        await client.connect()
         try:
-            manager = SchemaManager(driver)
+            manager = SchemaManager(client)
             if version:
                 return await manager.load_schema_version(name, version)
             return await manager.load_schema(name)
         finally:
-            await driver.close()
+            await client.close()
 
     try:
         schema_config = run_async(do_show())
@@ -641,19 +663,21 @@ def stats(format: str, uri: str, user: str, password: str | None):
         )
         sys.exit(1)
 
-    from neo4j import AsyncGraphDatabase
-
+    from neo4j_agent_memory.config.settings import Neo4jConfig
+    from neo4j_agent_memory.graph.client import Neo4jClient
     from neo4j_agent_memory.memory import LongTermMemory
 
     async def do_stats():
-        driver = AsyncGraphDatabase.driver(uri, auth=(user, password))
+        config = Neo4jConfig(uri=uri, username=user, password=password)
+        client = Neo4jClient(config)
+        await client.connect()
         try:
-            memory = LongTermMemory(driver)
+            memory = LongTermMemory(client)
             extraction_stats = await memory.get_extraction_stats()
             extractor_stats = await memory.get_extractor_stats()
             return extraction_stats, extractor_stats
         finally:
-            await driver.close()
+            await client.close()
 
     try:
         extraction_stats, extractor_stats = run_async(do_stats())

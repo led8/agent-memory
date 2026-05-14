@@ -88,6 +88,76 @@ Logs at `~/.agent-memory-backups/launchd.{out,err}.log`.
 
 This is opt-in because the user might not want background daemons. Manual `make backup-agent-memory` is sufficient for occasional use.
 
+## CLI test container (port 7688)
+
+A second Neo4j container runs alongside the production one for `tests/cli/` — defined in `docker-compose.cli-test.yml`, exposed on bolt://localhost:7688 with its own volume (`neo4j_cli_test_data`). Password defaults to `cli-test-password`.
+
+```bash
+make cli-test-up         # start the container
+make test-cli            # run the full CLI test suite (~3 min)
+make cli-test-down       # stop & keep volume
+make cli-test-logs       # tail logs
+```
+
+Why a separate container instead of testcontainers-per-test? CLI tests drive the wrapper as a subprocess and each invocation re-loads sentence-transformers (~1.5s). Sharing one container keeps the suite under 4 minutes.
+
+**The cli-test container has its own sentinel and is unrelated to the prod container.** A stray `MATCH (n) DETACH DELETE n` against bolt://7688 only wipes synthetic test data. The wrapper's `.env` sourcing of prod credentials is overridden by passing `--uri/--user/--password` flags directly (see `tests/cli/helpers.py`).
+
+## When does a backup actually run? (refresher)
+
+Three triggers exist. Only one is fully autonomous, and only after you opt in.
+
+| Trigger | When | Autonomous? |
+|---|---|---|
+| `make backup-agent-memory` | Only when you type it | ❌ Manual |
+| `make test-integration` / `test-all` / `test-e2e` / `test-integration-mcp` | Right before any of these test runs (via the `backup-agent-memory` Make dependency) | ⚠️ Event-driven, only when you run tests |
+| launchd agent (`scripts/com.spark.agent-memory.backup.plist`) | Every 6h + once at boot/login | ✅ Autonomous — **only after install** |
+
+Bypass the pre-test backup with the `*-raw` Make targets (`test-integration-raw`, `test-all-raw`, `test-integration-mcp-raw`) when the target DB is known throwaway.
+
+### Install the launchd agent (one-time)
+
+```bash
+cd /Users/adhuy/code/led8/ai/spark/agent-memory
+cp scripts/com.spark.agent-memory.backup.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.spark.agent-memory.backup.plist
+```
+
+After that:
+
+- Snapshot runs immediately (`RunAtLoad=true`).
+- Then every 6 hours (`StartInterval=21600`).
+- 30-backup rolling retention (configurable via `RETENTION=N` env in the plist).
+- Survives reboots and re-logins.
+
+### Verify it's working
+
+```bash
+# Trigger one snapshot now, without waiting 6h:
+launchctl start com.spark.agent-memory.backup
+
+# Most recent backup:
+ls -lt ~/.agent-memory-backups/ | head -5
+
+# If something looks wrong:
+tail ~/.agent-memory-backups/launchd.err.log
+```
+
+### Uninstall
+
+```bash
+launchctl unload ~/Library/LaunchAgents/com.spark.agent-memory.backup.plist
+rm ~/Library/LaunchAgents/com.spark.agent-memory.backup.plist
+```
+
+### Caveats
+
+1. **Container must be running.** If `neo4j-agent-memory-test` is stopped, the snapshot fails silently — error in `launchd.err.log`, no backup file produced. Check periodically.
+2. **Mac must be awake.** `StartInterval` is wall-clock; if the laptop is asleep at the 6h mark, the job fires when it wakes up — not while sleeping. Long sleeps = fewer snapshots.
+3. **`NEO4J_PASSWORD` source.** The script reads `.env` from its `WorkingDirectory` (= the repo root). If you move or rename the repo, edit the `WorkingDirectory` in the installed plist (and `launchctl unload` + `load` again).
+4. **Container name.** Default is `neo4j-agent-memory-test`. If you change it, set `NEO4J_CONTAINER=...` in the plist's `EnvironmentVariables`.
+5. **No off-machine copy.** Backups live on the same disk as the live DB. For real disaster recovery, periodically copy `~/.agent-memory-backups/` to another drive or cloud storage.
+
 ## Layer 4 — Restoring from backup
 
 The Cypher exports are directly replayable (after stripping the index/constraint statements that already exist):

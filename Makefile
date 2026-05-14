@@ -142,6 +142,27 @@ test-unit:
 backup-agent-memory:
 	@./scripts/backup_agent_memory.sh
 
+# ---------------------------------------------------------------------------
+# CLI command tests (subprocess-driven, dedicated container on port 7688)
+# ---------------------------------------------------------------------------
+# These exercise the user-facing `agent-memory` wrapper end-to-end against an
+# isolated Neo4j container with its own volume. Safe to run alongside the live
+# prod container on 7687 — different port, different volume, different
+# password. See docs/database-safety.md.
+cli-test-up:
+	@docker compose -f docker-compose.cli-test.yml up -d
+
+cli-test-down:
+	@docker compose -f docker-compose.cli-test.yml down
+
+cli-test-logs:
+	@docker compose -f docker-compose.cli-test.yml logs -f
+
+test-cli: cli-test-up
+	@echo "Running CLI command tests against bolt://localhost:7688..."
+	RUN_INTEGRATION_TESTS=1 uv run pytest tests/cli/ -v --timeout=120
+
+
 # Auto-backup BEFORE every potentially-destructive test target. The DB the
 # integration tests target is the same `bolt://localhost:7687` the user's CLI
 # uses; a stray `MATCH (n) DETACH DELETE n` in a fixture wipes everything.

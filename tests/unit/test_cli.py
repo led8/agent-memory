@@ -293,8 +293,7 @@ class TestExtractCommand:
         """Test extraction with LLM extractor."""
         mock_builder = MagicMock()
         mock_builder_class.return_value = mock_builder
-        mock_builder.with_llm.return_value = mock_builder
-        mock_builder.with_confidence_threshold.return_value = mock_builder
+        mock_builder.with_llm_fallback.return_value = mock_builder
 
         mock_extractor = MagicMock()
         mock_builder.build.return_value = mock_extractor
@@ -313,7 +312,7 @@ class TestExtractCommand:
         )
 
         assert result.exit_code == 0
-        mock_builder.with_llm.assert_called()
+        mock_builder.with_llm_fallback.assert_called()
 
     @patch("neo4j_agent_memory.cli.main.ExtractorBuilder")
     def test_extract_with_hybrid_extractor(
@@ -323,8 +322,7 @@ class TestExtractCommand:
         mock_builder = MagicMock()
         mock_builder_class.return_value = mock_builder
         mock_builder.with_gliner.return_value = mock_builder
-        mock_builder.with_llm.return_value = mock_builder
-        mock_builder.with_confidence_threshold.return_value = mock_builder
+        mock_builder.with_llm_fallback.return_value = mock_builder
 
         mock_extractor = MagicMock()
         mock_builder.build.return_value = mock_extractor
@@ -344,7 +342,7 @@ class TestExtractCommand:
 
         assert result.exit_code == 0
         mock_builder.with_gliner.assert_called()
-        mock_builder.with_llm.assert_called()
+        mock_builder.with_llm_fallback.assert_called()
 
     @patch("neo4j_agent_memory.cli.main.ExtractorBuilder")
     def test_extract_with_custom_model(self, mock_builder_class, runner, sample_extraction_result):
@@ -371,7 +369,7 @@ class TestExtractCommand:
         )
 
         assert result.exit_code == 0
-        mock_builder.with_gliner.assert_called_with(model_name="custom-gliner-model")
+        mock_builder.with_gliner.assert_called_with(model="custom-gliner-model")
 
     @patch("neo4j_agent_memory.cli.main.ExtractorBuilder")
     def test_extract_no_relations(self, mock_builder_class, runner, sample_extraction_result):
@@ -432,14 +430,20 @@ class TestExtractCommand:
     def test_extract_with_confidence_threshold(
         self, mock_builder_class, runner, sample_extraction_result
     ):
-        """Test extraction with custom confidence threshold."""
+        """Test that --confidence-threshold post-filters the extraction result.
+
+        The CLI applies a uniform post-filter (rather than a builder method),
+        so we assert the JSON output contains only entities at or above the
+        threshold.
+        """
         mock_builder = MagicMock()
         mock_builder_class.return_value = mock_builder
         mock_builder.with_gliner.return_value = mock_builder
-        mock_builder.with_confidence_threshold.return_value = mock_builder
 
         mock_extractor = MagicMock()
         mock_builder.build.return_value = mock_extractor
+        # Sample fixture has entities at 0.95 and 0.88. Threshold 0.9 should
+        # drop the 0.88 one.
         mock_extractor.extract = AsyncMock(return_value=sample_extraction_result)
 
         result = runner.invoke(
@@ -448,14 +452,17 @@ class TestExtractCommand:
                 "extract",
                 "John works at Acme Corp",
                 "--confidence-threshold",
-                "0.8",
+                "0.9",
                 "--format",
                 "json",
             ],
         )
 
         assert result.exit_code == 0
-        mock_builder.with_confidence_threshold.assert_called_with(0.8)
+        output = json.loads(result.output)
+        names = {e["name"] for e in output["entities"]}
+        assert "John Smith" in names  # confidence 0.95
+        assert "Acme Corp" not in names  # confidence 0.88, filtered out
 
     def test_extract_from_stdin(self, runner):
         """Test extraction from stdin."""
@@ -486,16 +493,17 @@ class TestSchemasCommand:
         assert result.exit_code == 1
         assert "password required" in result.output
 
-    @patch("neo4j.AsyncGraphDatabase")
+    @patch("neo4j_agent_memory.graph.client.Neo4jClient")
     @patch("neo4j_agent_memory.schema.SchemaManager")
-    def test_schemas_list_json(self, mock_manager_class, mock_driver_class, runner):
+    def test_schemas_list_json(self, mock_manager_class, mock_client_class, runner):
         """Test schemas list with JSON output."""
 
         from neo4j_agent_memory.schema import SchemaListItem
 
-        mock_driver = MagicMock()
-        mock_driver_class.driver.return_value = mock_driver
-        mock_driver.close = AsyncMock()
+        mock_client = MagicMock()
+        mock_client_class.return_value = mock_client
+        mock_client.connect = AsyncMock()
+        mock_client.close = AsyncMock()
 
         mock_manager = MagicMock()
         mock_manager_class.return_value = mock_manager
@@ -573,13 +581,14 @@ class TestStatsCommand:
         assert result.exit_code == 1
         assert "password required" in result.output
 
-    @patch("neo4j.AsyncGraphDatabase")
+    @patch("neo4j_agent_memory.graph.client.Neo4jClient")
     @patch("neo4j_agent_memory.memory.LongTermMemory")
-    def test_stats_json_output(self, mock_memory_class, mock_driver_class, runner):
+    def test_stats_json_output(self, mock_memory_class, mock_client_class, runner):
         """Test stats with JSON output."""
-        mock_driver = MagicMock()
-        mock_driver_class.driver.return_value = mock_driver
-        mock_driver.close = AsyncMock()
+        mock_client = MagicMock()
+        mock_client_class.return_value = mock_client
+        mock_client.connect = AsyncMock()
+        mock_client.close = AsyncMock()
 
         mock_memory = MagicMock()
         mock_memory_class.return_value = mock_memory
