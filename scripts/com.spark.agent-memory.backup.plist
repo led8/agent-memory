@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd agent: snapshots the agent-memory Neo4j corpus every 6 hours.
+
+  Install:
+    cp scripts/com.spark.agent-memory.backup.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.spark.agent-memory.backup.plist
+
+  Uninstall:
+    launchctl unload ~/Library/LaunchAgents/com.spark.agent-memory.backup.plist
+    rm ~/Library/LaunchAgents/com.spark.agent-memory.backup.plist
+
+  Trigger one snapshot manually:
+    launchctl start com.spark.agent-memory.backup
+
+  Logs:
+    ~/.agent-memory-backups/launchd.out.log
+    ~/.agent-memory-backups/launchd.err.log
+
+  IMPORTANT: edit `WorkingDirectory` and `EnvironmentVariables.NEO4J_PASSWORD`
+  below to match your environment before installing.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.spark.agent-memory.backup</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/adhuy/code/led8/ai/spark/agent-memory/scripts/backup_agent_memory.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/adhuy/code/led8/ai/spark/agent-memory</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+        <!-- Either set NEO4J_PASSWORD here OR rely on .env in WorkingDirectory -->
+    </dict>
+
+    <!-- Run every 6 hours (21600 seconds) -->
+    <key>StartInterval</key>
+    <integer>21600</integer>
+
+    <!-- Also run once shortly after load (boot/login) -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/adhuy/.agent-memory-backups/launchd.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/adhuy/.agent-memory-backups/launchd.err.log</string>
+
+    <!-- Don't keep alive: this is a periodic one-shot, not a daemon -->
+    <key>KeepAlive</key>
+    <false/>
+</dict>
+</plist>

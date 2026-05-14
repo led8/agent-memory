@@ -26,6 +26,8 @@ from neo4j_agent_memory.config.settings import (
 )
 from neo4j_agent_memory.embeddings.base import BaseEmbedder
 
+from tests.conftest import _safe_wipe_test_db
+
 
 _SPARK_TOKEN = "[SPARK]"
 _OFFTOPIC_TOKEN = "[OFFTOPIC]"
@@ -94,8 +96,9 @@ class TestGetContextCorrelation:
         self, correlation_settings, topic_embedder
     ):
         async with MemoryClient(correlation_settings, embedder=topic_embedder) as client:
-            # Wipe any existing data in this database for test isolation.
-            await client._client.execute_write("MATCH (n) DETACH DELETE n")
+            # Wipe any existing data in this database for test isolation
+            # (sentinel-guarded — aborts loudly if not a registered test DB).
+            await _safe_wipe_test_db(client)
 
             # Seed: one on-topic and one off-topic item per memory category.
             entity_on, _ = await client.long_term.add_entity(
@@ -183,7 +186,7 @@ class TestGetContextCorrelation:
         self, correlation_settings, topic_embedder
     ):
         async with MemoryClient(correlation_settings, embedder=topic_embedder) as client:
-            await client._client.execute_write("MATCH (n) DETACH DELETE n")
+            await _safe_wipe_test_db(client)
 
             await client.long_term.add_entity(
                 f"Spark project {_SPARK_TOKEN}",
@@ -223,7 +226,7 @@ class TestGetContextCorrelation:
         self, correlation_settings, topic_embedder
     ):
         async with MemoryClient(correlation_settings, embedder=topic_embedder) as client:
-            await client._client.execute_write("MATCH (n) DETACH DELETE n")
+            await _safe_wipe_test_db(client)
 
             await client.long_term.add_fact(
                 subject="spark",

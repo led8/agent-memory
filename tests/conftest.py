@@ -374,8 +374,97 @@ def neo4j_container():
 
 @pytest.fixture(scope="session")
 def neo4j_connection_info(neo4j_container):
-    """Get Neo4j connection info from the container."""
+    """Get Neo4j connection info from the container.
+
+    Also marks the target DB as test-safe by inserting a ``:_TestSentinel``
+    node. Any test fixture that wants to wipe the DB MUST first verify this
+    sentinel exists — see ``_safe_wipe_test_db``. This protects against the
+    common foot-gun of pointing ``NEO4J_URI`` at a real database during local
+    development.
+    """
+    import asyncio
+
+    from neo4j_agent_memory.config.settings import MemorySettings, Neo4jConfig
+    from neo4j_agent_memory.graph.client import Neo4jClient
+    from pydantic import SecretStr
+
+    settings = MemorySettings(
+        neo4j=Neo4jConfig(
+            uri=neo4j_container["uri"],
+            username=neo4j_container["username"],
+            password=SecretStr(neo4j_container["password"]),
+        )
+    )
+
+    async def _stamp_sentinel() -> None:
+        client = Neo4jClient(settings.neo4j)
+        await client.connect()
+        try:
+            # Refuse to auto-stamp on a DB that already has user data and no
+            # prior sentinel — that's almost certainly a real corpus the user
+            # didn't intend to expose to destructive tests. The user must
+            # opt in by manually inserting:
+            #   MERGE (:_TestSentinel {id: 'singleton'})
+            existing = await client.execute_read(
+                "MATCH (s:_TestSentinel) RETURN count(s) AS c"
+            )
+            has_sentinel = existing and existing[0]["c"] > 0
+            if not has_sentinel:
+                node_count = await client.execute_read(
+                    "MATCH (n) WHERE NOT n:_TestSentinel "
+                    "RETURN count(n) AS c"
+                )
+                count = node_count[0]["c"] if node_count else 0
+                if count > 0:
+                    raise RuntimeError(
+                        f"REFUSING TO STAMP SENTINEL: target Neo4j at "
+                        f"{settings.neo4j.uri} has {count} non-test nodes "
+                        f"and no :_TestSentinel marker. This looks like a "
+                        f"real corpus. If you intend to use this DB for "
+                        f"integration tests, manually run: "
+                        f"MERGE (:_TestSentinel {{id: 'singleton'}}) "
+                        f"— then re-run the tests. (You almost certainly "
+                        f"want to point NEO4J_URI at a throwaway container "
+                        f"instead.)"
+                    )
+            await client.execute_write(
+                "MERGE (s:_TestSentinel {id: 'singleton'}) "
+                "SET s.created_at = coalesce(s.created_at, datetime()), "
+                "s.last_seen_at = datetime()"
+            )
+        finally:
+            await client.close()
+
+    asyncio.run(_stamp_sentinel())
     return neo4j_container
+
+
+async def _safe_wipe_test_db(client) -> None:
+    """Wipe all nodes — ONLY if the test sentinel is present.
+
+    Aborts loudly if the target DB has no ``:_TestSentinel`` node, which means
+    the caller is pointing at something that was never registered as a test
+    DB (likely a real corpus reachable via ``NEO4J_URI``).
+
+    Pass either a ``MemoryClient`` (uses ``client._client``) or a raw
+    ``Neo4jClient``.
+    """
+    raw = getattr(client, "_client", client)
+    rows = await raw.execute_read(
+        "MATCH (s:_TestSentinel) RETURN count(s) AS c"
+    )
+    count = rows[0]["c"] if rows else 0
+    if count == 0:
+        raise RuntimeError(
+            "REFUSING TO WIPE: target Neo4j has no :_TestSentinel node. "
+            "This DB was not registered by the testcontainers fixture and "
+            "may contain real data. If you really want to wipe it, manually "
+            "insert: MERGE (:_TestSentinel {id: 'singleton'}). "
+            "See tests/conftest.py for context."
+        )
+    await raw.execute_write(
+        "MATCH (n) WHERE NOT n:_TestSentinel DETACH DELETE n"
+    )
 
 
 # =============================================================================
@@ -459,9 +548,9 @@ async def memory_client(
 
     yield client
 
-    # Cleanup test data - delete all test entities
+    # Cleanup test data - delete all test entities (sentinel-guarded)
     try:
-        await client._client.execute_write("MATCH (n) DETACH DELETE n")
+        await _safe_wipe_test_db(client)
     except Exception:
         pass
 
@@ -491,17 +580,17 @@ async def clean_memory_client(
     except Exception as e:
         pytest.skip(f"Neo4j not available: {e}")
 
-    # Clean before test - delete all nodes
+    # Clean before test - delete all nodes (sentinel-guarded)
     try:
-        await client._client.execute_write("MATCH (n) DETACH DELETE n")
+        await _safe_wipe_test_db(client)
     except Exception:
         pass
 
     yield client
 
-    # Clean after test - delete all nodes
+    # Clean after test - delete all nodes (sentinel-guarded)
     try:
-        await client._client.execute_write("MATCH (n) DETACH DELETE n")
+        await _safe_wipe_test_db(client)
     except Exception:
         pass
 
