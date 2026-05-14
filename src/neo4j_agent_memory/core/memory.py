@@ -83,6 +83,8 @@ class BaseMemory(ABC, Generic[T]):
         client: "Neo4jClient",
         embedder: "Embedder | None" = None,
         extractor: "EntityExtractor | None" = None,
+        search_config: "Any | None" = None,
+        embedding_config: "Any | None" = None,
     ):
         """
         Initialize the memory.
@@ -91,10 +93,34 @@ class BaseMemory(ABC, Generic[T]):
             client: Neo4j client for database operations
             embedder: Optional embedder for generating embeddings
             extractor: Optional entity extractor for content analysis
+            search_config: Optional ``SearchConfig`` used to resolve per-category
+                similarity thresholds. When None, ``_resolve_threshold`` falls
+                back to a conservative legacy default.
+            embedding_config: Optional ``EmbeddingConfig`` whose
+                ``recommended_threshold`` is used as the final fallback in
+                threshold resolution.
         """
         self._client = client
         self._embedder = embedder
         self._extractor = extractor
+        self._search_config = search_config
+        self._embedding_config = embedding_config
+
+    def _resolve_threshold(self, category: str, override: float | None) -> float:
+        """Resolve the active similarity threshold for a search category.
+
+        Order:
+        1. ``override`` if not ``None`` (zero is a valid explicit override).
+        2. ``SearchConfig.resolve_threshold(category, embedding_config)`` when
+           both configs are available.
+        3. Conservative legacy default ``0.7`` (matches pre-V1.2 behavior).
+        """
+        if override is not None:
+            return override
+        if self._search_config is not None and self._embedding_config is not None:
+            return self._search_config.resolve_threshold(category, self._embedding_config)
+        return 0.7
+
 
     @property
     def client(self) -> "Neo4jClient":

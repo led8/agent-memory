@@ -519,6 +519,41 @@ for result in results:
 
 ## Common Patterns
 
+### Configuring search relevance threshold (V1.2+)
+
+All vector search methods (`search_messages`, `search_entities`, `search_preferences`, `search_facts`, `get_similar_traces`) and `MemoryClient.get_context()` resolve their similarity threshold via three layers, in order:
+
+1. Explicit `threshold` / `relevance_threshold` argument on the call.
+2. Per-category override on `SearchConfig` (`message_threshold`, `entity_threshold`, `preference_threshold`, `fact_threshold`, `trace_threshold`) or `default_threshold`.
+3. `EmbeddingConfig.recommended_threshold(category)` — provider-aware fallback.
+
+The per-provider recommendations baked into `EmbeddingConfig.recommended_threshold()`:
+
+| Embedder | Default | Prefs | Facts | Entities | Messages | Traces |
+|---|---|---|---|---|---|---|
+| `BAAI/bge-small-en-v1.5` (calibrated 2026-05-14) | 0.82 | 0.80 | 0.85 | 0.83 | 0.82 | 0.83 |
+| OpenAI `text-embedding-3-*` | 0.82 | 0.82 | 0.82 | 0.82 | 0.82 | 0.82 |
+| Vertex AI / Bedrock | 0.78 | — | — | — | — | — |
+| Custom (`LocalHashedEmbedder`) | 0.55 | — | — | — | — | — |
+
+Providers other than BGE-small currently share a single conservative default across categories; calibrate empirically before adding per-category recommendations (see `.spark_utils/data/20260514_threshold_calibration.md` for the BGE-small calibration method).
+
+Override examples:
+
+```python
+# Per-call override
+context = await client.get_context("...", relevance_threshold=0.85)
+
+# Per-category settings override
+from neo4j_agent_memory.config.settings import SearchConfig
+settings.search = SearchConfig(fact_threshold=0.90, entity_threshold=0.85)
+
+# CLI
+agent-memory memory get-context --query "..." --relevance-threshold 0.85
+```
+
+Value `0.0` is a valid explicit "no filtering" override; `None` triggers settings-based resolution.
+
 ### Basic Usage
 
 ```python

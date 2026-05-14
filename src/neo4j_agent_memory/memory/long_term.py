@@ -355,6 +355,8 @@ class LongTermMemory(BaseMemory[Entity]):
         entity_types: list[str] | None = None,
         strict_types: bool = False,
         deduplication: DeduplicationConfig | None = None,
+        search_config: "Any | None" = None,
+        embedding_config: "Any | None" = None,
     ):
         """Initialize long-term memory.
 
@@ -368,8 +370,12 @@ class LongTermMemory(BaseMemory[Entity]):
             entity_types: Allowed entity types (defaults to POLE+O)
             strict_types: If True, reject entities with unknown types
             deduplication: Optional deduplication configuration (defaults to enabled)
+            search_config: Optional ``SearchConfig`` for per-category threshold
+                resolution.
+            embedding_config: Optional ``EmbeddingConfig`` for fallback
+                threshold recommendations.
         """
-        super().__init__(client, embedder, extractor)
+        super().__init__(client, embedder, extractor, search_config, embedding_config)
         self._resolver = resolver
         self._geocoder = geocoder
         self._enrichment_service = enrichment_service
@@ -885,7 +891,7 @@ class LongTermMemory(BaseMemory[Entity]):
         *,
         entity_types: list[EntityType | str] | None = None,
         limit: int = 10,
-        threshold: float = 0.7,
+        threshold: float | None = None,
     ) -> list[Entity]:
         """
         Search for entities by semantic similarity.
@@ -894,13 +900,16 @@ class LongTermMemory(BaseMemory[Entity]):
             query: Search query
             entity_types: Optional filter by entity types
             limit: Maximum results
-            threshold: Minimum similarity threshold
+            threshold: Minimum similarity threshold. ``None`` resolves via
+                settings; ``0.0`` is a valid "no filtering" override.
 
         Returns:
             List of matching entities
         """
         if self._embedder is None:
             return []
+
+        threshold = self._resolve_threshold("entity", threshold)
 
         query_embedding = await self._embedder.embed(query)
 
@@ -968,7 +977,7 @@ class LongTermMemory(BaseMemory[Entity]):
         *,
         category: str | None = None,
         limit: int = 10,
-        threshold: float = 0.7,
+        threshold: float | None = None,
         include_superseded: bool = False,
     ) -> list[Preference]:
         """
@@ -978,7 +987,8 @@ class LongTermMemory(BaseMemory[Entity]):
             query: Search query
             category: Optional filter by category
             limit: Maximum results
-            threshold: Minimum similarity threshold
+            threshold: Minimum similarity threshold. ``None`` resolves via
+                settings; ``0.0`` is a valid "no filtering" override.
 
         Returns:
             List of matching preferences
@@ -997,6 +1007,8 @@ class LongTermMemory(BaseMemory[Entity]):
                     ]
                 return preferences
             return []
+
+        threshold = self._resolve_threshold("preference", threshold)
 
         query_embedding = await self._embedder.embed(query)
 
@@ -1135,6 +1147,9 @@ class LongTermMemory(BaseMemory[Entity]):
             include_preferences: Whether to include preferences
             include_facts: Whether to include facts
             max_items: Maximum items per category
+            relevance_threshold: Optional explicit threshold override forwarded
+                uniformly to ``search_preferences``, ``search_facts``, and
+                ``search_entities``. ``None`` resolves per-category via settings.
 
         Returns:
             Formatted context string
@@ -1143,31 +1158,45 @@ class LongTermMemory(BaseMemory[Entity]):
         include_preferences = kwargs.get("include_preferences", True)
         include_facts = kwargs.get("include_facts", True)
         max_items = kwargs.get("max_items", 10)
+        relevance_threshold = kwargs.get("relevance_threshold")
 
         parts = []
 
         # Get relevant preferences
         if include_preferences:
-            preferences = await self.search_preferences(query, limit=max_items)
+            preferences = await self.search_preferences(
+                query, limit=max_items, threshold=relevance_threshold
+            )
             if preferences:
                 parts.append("### User Preferences")
                 for pref in preferences:
                     line = f"- [{pref.category}] {pref.preference}"
                     if pref.context:
                         line += f" (context: {pref.context})"
+                    score = (pref.metadata or {}).get("similarity")
+                    if score is not None:
+                        line += f" (relevance: {score:.2f})"
                     parts.append(line)
 
         # Get relevant facts
         if include_facts:
-            facts = await self.search_facts(query, limit=max_items)
+            facts = await self.search_facts(
+                query, limit=max_items, threshold=relevance_threshold
+            )
             if facts:
                 parts.append("\n### Relevant Facts")
                 for fact in facts:
-                    parts.append(f"- {fact.subject} {fact.predicate} {fact.object}")
+                    line = f"- {fact.subject} {fact.predicate} {fact.object}"
+                    score = (fact.metadata or {}).get("similarity")
+                    if score is not None:
+                        line += f" (relevance: {score:.2f})"
+                    parts.append(line)
 
         # Get relevant entities
         if include_entities:
-            entities = await self.search_entities(query, limit=max_items)
+            entities = await self.search_entities(
+                query, limit=max_items, threshold=relevance_threshold
+            )
             if entities:
                 parts.append("\n### Relevant Entities")
                 for entity in entities:
@@ -1175,6 +1204,9 @@ class LongTermMemory(BaseMemory[Entity]):
                     line = f"- {entity.display_name} ({type_str})"
                     if entity.description:
                         line += f": {entity.description}"
+                    score = (entity.metadata or {}).get("similarity")
+                    if score is not None:
+                        line += f" (relevance: {score:.2f})"
                     parts.append(line)
 
         return "\n".join(parts)
@@ -1969,7 +2001,7 @@ class LongTermMemory(BaseMemory[Entity]):
         query: str,
         *,
         limit: int = 10,
-        threshold: float = 0.7,
+        threshold: float | None = None,
         include_superseded: bool = False,
     ) -> list[Fact]:
         """
@@ -1978,7 +2010,8 @@ class LongTermMemory(BaseMemory[Entity]):
         Args:
             query: Search query
             limit: Maximum results
-            threshold: Minimum similarity threshold
+            threshold: Minimum similarity threshold. ``None`` resolves via
+                settings; ``0.0`` is a valid "no filtering" override.
 
         Returns:
             List of matching facts
@@ -1989,6 +2022,8 @@ class LongTermMemory(BaseMemory[Entity]):
                 limit=limit,
                 include_superseded=include_superseded,
             )
+
+        threshold = self._resolve_threshold("fact", threshold)
 
         query_embedding = await self._embedder.embed(query)
 

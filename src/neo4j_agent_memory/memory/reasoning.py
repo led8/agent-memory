@@ -342,9 +342,11 @@ class ReasoningMemory(BaseMemory[ReasoningStep]):
         self,
         client: "Neo4jClient",
         embedder: "Embedder | None" = None,
+        search_config: "Any | None" = None,
+        embedding_config: "Any | None" = None,
     ):
         """Initialize reasoning memory."""
-        super().__init__(client, embedder, None)
+        super().__init__(client, embedder, None, search_config, embedding_config)
 
     async def add(self, content: str, **kwargs: Any) -> ReasoningStep:
         """Add content as a reasoning step."""
@@ -743,7 +745,7 @@ class ReasoningMemory(BaseMemory[ReasoningStep]):
         *,
         limit: int = 5,
         success_only: bool = True,
-        threshold: float = 0.7,
+        threshold: float | None = None,
     ) -> list[ReasoningTrace]:
         """
         Find similar past reasoning traces.
@@ -752,7 +754,8 @@ class ReasoningMemory(BaseMemory[ReasoningStep]):
             task: Task description to match
             limit: Maximum number of results
             success_only: Only return successful traces
-            threshold: Minimum similarity threshold
+            threshold: Minimum similarity threshold. ``None`` resolves via
+                settings; ``0.0`` is a valid "no filtering" override.
 
         Returns:
             List of similar reasoning traces
@@ -763,6 +766,8 @@ class ReasoningMemory(BaseMemory[ReasoningStep]):
                 limit=limit,
                 success_only=success_only,
             )
+
+        threshold = self._resolve_threshold("trace", threshold)
 
         task_embedding = await self._embedder.embed(task)
 
@@ -977,14 +982,22 @@ class ReasoningMemory(BaseMemory[ReasoningStep]):
             query: Task description to find similar traces
             max_traces: Maximum traces to include
             include_successful_only: Only include successful traces
+            relevance_threshold: Optional explicit threshold override.
+                ``None`` resolves via settings.
 
         Returns:
             Formatted context string
         """
         max_traces = kwargs.get("max_traces", 3)
         success_only = kwargs.get("include_successful_only", True)
+        relevance_threshold = kwargs.get("relevance_threshold")
 
-        traces = await self.get_similar_traces(query, limit=max_traces, success_only=success_only)
+        traces = await self.get_similar_traces(
+            query,
+            limit=max_traces,
+            success_only=success_only,
+            threshold=relevance_threshold,
+        )
 
         if not traces:
             return ""
@@ -998,7 +1011,7 @@ class ReasoningMemory(BaseMemory[ReasoningStep]):
             details = self._summarize_trace_details(trace_for_context)
             parts.append(f"**Task**: {trace.task}")
             if similarity is not None:
-                parts.append(f"- Similarity: {similarity:.2f}")
+                parts.append(f"- Relevance: {similarity:.2f}")
             elif text_overlap is not None:
                 parts.append(f"- Text overlap: {text_overlap}")
             if trace.outcome:

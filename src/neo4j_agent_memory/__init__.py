@@ -381,6 +381,8 @@ class MemoryClient:
             self._client,
             self._embedder,
             self._extractor,
+            search_config=self._settings.search,
+            embedding_config=self._settings.embedding,
         )
         self._long_term = LongTermMemory(
             self._client,
@@ -389,10 +391,14 @@ class MemoryClient:
             self._resolver,
             self._geocoder,
             self._enrichment_service,
+            search_config=self._settings.search,
+            embedding_config=self._settings.embedding,
         )
         self._reasoning = ReasoningMemory(
             self._client,
             self._embedder,
+            search_config=self._settings.search,
+            embedding_config=self._settings.embedding,
         )
 
     async def close(self) -> None:
@@ -509,6 +515,7 @@ class MemoryClient:
         include_long_term: bool = True,
         include_reasoning: bool = True,
         max_items: int = 10,
+        relevance_threshold: float | None = None,
     ) -> str:
         """
         Get combined context from all memory types for an LLM prompt.
@@ -523,6 +530,9 @@ class MemoryClient:
             include_long_term: Whether to include facts and preferences
             include_reasoning: Whether to include similar task traces
             max_items: Maximum items per memory type
+            relevance_threshold: Optional override applied uniformly to all
+                underlying searches. ``None`` (default) lets each layer resolve
+                its own per-category threshold from settings.
 
         Returns:
             Formatted context string suitable for LLM prompts
@@ -534,6 +544,7 @@ class MemoryClient:
                 query,
                 session_id=session_id,
                 max_messages=max_items,
+                relevance_threshold=relevance_threshold,
             )
             if short_term_context:
                 parts.append(f"## Conversation History\n{short_term_context}")
@@ -542,6 +553,7 @@ class MemoryClient:
             long_term_context = await self.long_term.get_context(
                 query,
                 max_items=max_items,
+                relevance_threshold=relevance_threshold,
             )
             if long_term_context:
                 parts.append(f"## Relevant Knowledge\n{long_term_context}")
@@ -550,6 +562,7 @@ class MemoryClient:
             reasoning_context = await self.reasoning.get_context(
                 query,
                 max_traces=max_items // 2,
+                relevance_threshold=relevance_threshold,
             )
             if reasoning_context:
                 parts.append(f"## Similar Past Tasks\n{reasoning_context}")

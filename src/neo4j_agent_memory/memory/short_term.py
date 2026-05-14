@@ -276,9 +276,11 @@ class ShortTermMemory(BaseMemory[Message]):
         client: "Neo4jClient",
         embedder: "Embedder | None" = None,
         extractor: "EntityExtractor | None" = None,
+        search_config: "Any | None" = None,
+        embedding_config: "Any | None" = None,
     ):
         """Initialize short-term memory."""
-        super().__init__(client, embedder, extractor)
+        super().__init__(client, embedder, extractor, search_config, embedding_config)
 
     async def add(self, content: str, **kwargs: Any) -> Message:
         """Add content as a message."""
@@ -630,7 +632,7 @@ class ShortTermMemory(BaseMemory[Message]):
         *,
         session_id: str | None = None,
         limit: int = 10,
-        threshold: float = 0.7,
+        threshold: float | None = None,
         metadata_filters: dict[str, Any] | None = None,
     ) -> list[Message]:
         """
@@ -640,7 +642,10 @@ class ShortTermMemory(BaseMemory[Message]):
             query: Search query
             session_id: Optional filter by session
             limit: Maximum results
-            threshold: Minimum similarity threshold
+            threshold: Minimum similarity threshold. ``None`` resolves via
+                settings (per-category override → default → embedder
+                recommendation). ``0.0`` is a valid explicit "no filtering"
+                override.
             metadata_filters: Optional metadata-based filters. Supports:
                 - Simple equality: {"speaker": "Brian Chesky"}
                 - Comparison operators: {"turn_index": {"$gt": 5}}
@@ -653,6 +658,8 @@ class ShortTermMemory(BaseMemory[Message]):
         """
         if self._embedder is None:
             return []
+
+        threshold = self._resolve_threshold("message", threshold)
 
         query_embedding = await self._embedder.embed(query)
 
@@ -713,12 +720,15 @@ class ShortTermMemory(BaseMemory[Message]):
             session_id: Optional session filter
             max_messages: Maximum messages to include
             include_related: Whether to include related entities
+            relevance_threshold: Optional explicit threshold override forwarded
+                to ``search_messages``. ``None`` resolves via settings.
 
         Returns:
             Formatted context string
         """
         session_id = kwargs.get("session_id")
         max_messages = kwargs.get("max_messages", 10)
+        relevance_threshold = kwargs.get("relevance_threshold")
 
         parts = []
 
@@ -732,7 +742,9 @@ class ShortTermMemory(BaseMemory[Message]):
 
         # Search for relevant messages
         if self._embedder is not None:
-            relevant = await self.search_messages(query, limit=5)
+            relevant = await self.search_messages(
+                query, limit=5, threshold=relevance_threshold
+            )
             if relevant:
                 parts.append("\n### Relevant Past Messages")
                 for msg in relevant:

@@ -112,6 +112,34 @@ class EmbeddingConfig(BaseModel):
         "all-distilroberta-v1": 768,
     }
 
+    # Per-category recommended thresholds for the production sentence-transformer
+    # model (BAAI/bge-small-en-v1.5). Calibrated empirically on 2026-05-14 against
+    # the live agent-memory corpus; see
+    # `.spark_utils/data/20260514_threshold_calibration.md` for the full report.
+    _BGE_SMALL_THRESHOLDS = {
+        "default": 0.82,
+        "preference": 0.80,
+        "fact": 0.85,
+        "entity": 0.83,
+        "message": 0.82,
+        "trace": 0.83,
+    }
+
+    # Conservative defaults for providers we have not calibrated yet. Values are
+    # informed by published baseline cosine distributions and are intentionally
+    # tighter than 0.7. Calibrate empirically when these providers are actually
+    # used (see backlog item 20260514_agent-memory_get_context_correlation_tightening).
+    _PROVIDER_DEFAULT_THRESHOLDS: dict[str, float] = {
+        # OpenAI text-embedding-3-* exhibit baseline cosines in the 0.72–0.82 band
+        # for unrelated short text; 0.82 is the conservative lower bound.
+        "openai": 0.82,
+        "vertex_ai": 0.78,
+        "bedrock": 0.78,
+        # Hashed local embedder is overlap-based and far less discriminative.
+        "custom": 0.55,
+        "anthropic": 0.78,
+    }
+
     provider: EmbeddingProvider = Field(
         default=EmbeddingProvider.OPENAI, description="Embedding provider to use"
     )
@@ -142,6 +170,27 @@ class EmbeddingConfig(BaseModel):
 
         if "dimensions" not in self.model_fields_set:
             self.dimensions = self._SENTENCE_TRANSFORMER_DIMENSIONS.get(self.model, 384)
+
+    def recommended_threshold(self, category: str = "default") -> float:
+        """Return the recommended cosine threshold for this embedder + category.
+
+        Categories: ``default``, ``preference``, ``fact``, ``entity``,
+        ``message``, ``trace``. Unknown categories fall back to ``default``.
+
+        BGE-small thresholds were calibrated empirically against the live
+        corpus on 2026-05-14. Other providers use conservative published-baseline
+        defaults until calibrated.
+        """
+        if (
+            self.provider == EmbeddingProvider.SENTENCE_TRANSFORMERS
+            and self.model == self._SENTENCE_TRANSFORMER_DEFAULT_MODEL
+        ):
+            table = self._BGE_SMALL_THRESHOLDS
+            return table.get(category, table["default"])
+
+        # Provider-level default; categories are not differentiated for
+        # uncalibrated providers (would be misleading).
+        return self._PROVIDER_DEFAULT_THRESHOLDS.get(self.provider.value, 0.78)
 
 
 class LLMConfig(BaseModel):
@@ -282,14 +331,70 @@ class MemoryConfig(BaseModel):
 
 
 class SearchConfig(BaseModel):
-    """Search configuration."""
+    """Search configuration.
+
+    Threshold resolution order (per category):
+    1. Per-category override (``message_threshold``, ``entity_threshold``,
+       ``preference_threshold``, ``fact_threshold``, ``trace_threshold``).
+    2. ``default_threshold`` if explicitly set.
+    3. ``EmbeddingConfig.recommended_threshold(category)``.
+    """
 
     default_limit: int = Field(default=10, ge=1, description="Default search limit")
-    default_threshold: float = Field(
-        default=0.7, ge=0.0, le=1.0, description="Default similarity threshold"
+    default_threshold: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Default similarity threshold. When None, falls back to "
+        "EmbeddingConfig.recommended_threshold().",
+    )
+    message_threshold: float | None = Field(
+        default=None, ge=0.0, le=1.0, description="Override threshold for short-term messages"
+    )
+    entity_threshold: float | None = Field(
+        default=None, ge=0.0, le=1.0, description="Override threshold for long-term entities"
+    )
+    preference_threshold: float | None = Field(
+        default=None, ge=0.0, le=1.0, description="Override threshold for long-term preferences"
+    )
+    fact_threshold: float | None = Field(
+        default=None, ge=0.0, le=1.0, description="Override threshold for long-term facts"
+    )
+    trace_threshold: float | None = Field(
+        default=None, ge=0.0, le=1.0, description="Override threshold for reasoning traces"
     )
     hybrid_search_enabled: bool = Field(default=True, description="Enable hybrid search")
     graph_depth: int = Field(default=2, ge=1, description="Graph traversal depth for search")
+
+    _CATEGORY_FIELD = {
+        "message": "message_threshold",
+        "entity": "entity_threshold",
+        "preference": "preference_threshold",
+        "fact": "fact_threshold",
+        "trace": "trace_threshold",
+    }
+
+    def resolve_threshold(self, category: str, embedding: "EmbeddingConfig") -> float:
+        """Resolve the active threshold for a memory category.
+
+        Order: per-category override → ``default_threshold`` →
+        ``embedding.recommended_threshold(category)``.
+
+        Args:
+            category: One of ``message``, ``entity``, ``preference``, ``fact``,
+                ``trace``. Unknown categories return ``default_threshold`` or the
+                provider-level recommendation.
+            embedding: The active embedding configuration whose recommendations
+                are used as fallback.
+        """
+        field = self._CATEGORY_FIELD.get(category)
+        if field is not None:
+            override = getattr(self, field)
+            if override is not None:
+                return override
+        if self.default_threshold is not None:
+            return self.default_threshold
+        return embedding.recommended_threshold(category)
 
 
 class GeocodingProvider(str, Enum):

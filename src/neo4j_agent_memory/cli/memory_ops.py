@@ -621,6 +621,7 @@ class MemoryCliService:
         include_long_term: bool = True,
         include_reasoning: bool = True,
         max_items: int = 10,
+        relevance_threshold: float | None = None,
     ) -> dict[str, Any]:
         context = await self.client.get_context(
             query=query,
@@ -629,6 +630,7 @@ class MemoryCliService:
             include_long_term=include_long_term,
             include_reasoning=include_reasoning,
             max_items=max_items,
+            relevance_threshold=relevance_threshold,
         )
         return {
             "session_id": session_id,

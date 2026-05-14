@@ -1333,6 +1333,17 @@ def memory_search(
 @click.option("--include-long-term/--no-include-long-term", default=True)
 @click.option("--include-reasoning/--no-include-reasoning", default=True)
 @click.option("--max-items", type=int, default=10, help="Maximum items per layer.")
+@click.option(
+    "--relevance-threshold",
+    type=click.FloatRange(0.0, 1.0),
+    default=None,
+    help=(
+        "Override the similarity threshold uniformly across all searches. "
+        "Default uses per-category recommendations from EmbeddingConfig "
+        "(BGE-small calibrated 2026-05-14: prefs 0.80, facts 0.85, "
+        "entities 0.83, messages 0.82, traces 0.83)."
+    ),
+)
 @click.pass_obj
 def memory_get_context(
     connection: MemoryCliConnection,
@@ -1342,6 +1353,7 @@ def memory_get_context(
     include_long_term: bool,
     include_reasoning: bool,
     max_items: int,
+    relevance_threshold: float | None,
 ):
     """Assemble combined context across the enabled memory layers."""
     payload = run_memory_operation(
@@ -1353,6 +1365,7 @@ def memory_get_context(
             include_long_term=include_long_term,
             include_reasoning=include_reasoning,
             max_items=max_items,
+            relevance_threshold=relevance_threshold,
         ),
     )
     echo_json(payload)
