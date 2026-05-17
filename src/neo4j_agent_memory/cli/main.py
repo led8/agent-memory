@@ -1543,6 +1543,37 @@ def memory_get_provenance(connection: MemoryCliConnection, kind: str, entry_id_o
         ))
 
 
+@memory.command("link-neighbors")
+@click.option("--label", default=None, help="Restrict to a label (Fact, Preference, Message, ReasoningTrace).")
+@click.option("--batch-size", default=50, type=int, help="Nodes to process per batch.")
+@click.option("--max-neighbors", default=None, type=int, help="Override max neighbors per node.")
+@click.option("--min-similarity", default=None, type=float, help="Override min similarity threshold.")
+@click.option("--backfill", is_flag=True, default=False, help="Only link nodes with no existing RELATES_TO edges.")
+@click.pass_obj
+def memory_link_neighbors(
+    connection: MemoryCliConnection,
+    label: str | None,
+    batch_size: int,
+    max_neighbors: int | None,
+    min_similarity: float | None,
+    backfill: bool,
+):
+    """Create semantic RELATES_TO edges between similar nodes.
+
+    By default processes all nodes. Use --backfill to only link orphan nodes.
+    """
+    def _run(service: MemoryCliService) -> dict:
+        return service.link_neighbors(
+            label=label,
+            batch_size=batch_size,
+            max_neighbors=max_neighbors,
+            min_similarity=min_similarity,
+            backfill=backfill,
+        )
+
+    echo_json(run_memory_operation(connection, _run))
+
+
 @cli.group()
 def mcp():
     """MCP (Model Context Protocol) server commands.

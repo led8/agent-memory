@@ -281,6 +281,11 @@ class ShortTermMemory(BaseMemory[Message]):
     ):
         """Initialize short-term memory."""
         super().__init__(client, embedder, extractor, search_config, embedding_config)
+        self._linker: Any | None = None  # Injected by MemoryClient after init
+
+    def set_linker(self, linker: Any) -> None:
+        """Inject the GraphLinker (called by MemoryClient after connect)."""
+        self._linker = linker
 
     async def add(self, content: str, **kwargs: Any) -> Message:
         """Add content as a message."""
@@ -552,6 +557,14 @@ class ShortTermMemory(BaseMemory[Message]):
         # Extract and link entities if enabled
         if extract_entities and self._extractor is not None:
             await self._extract_and_link_entities(message, extract_relations=extract_relations)
+
+        # Semantic neighborhood linking (cross-layer: message -> facts/preferences)
+        if message.embedding and self._linker is not None:
+            await self._linker.link_to_neighborhood(
+                node_id=str(message.id),
+                node_label="Message",
+                embedding=message.embedding,
+            )
 
         return message
 

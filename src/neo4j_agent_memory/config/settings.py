@@ -521,6 +521,28 @@ class EnrichmentConfig(BaseModel):
     )
 
 
+class LinkerConfig(BaseModel):
+    """Configuration for semantic neighborhood linking.
+
+    Controls how the GraphLinker creates RELATES_TO edges between
+    semantically similar nodes across all memory layers.
+    """
+
+    enabled: bool = Field(default=True, description="Enable automatic neighborhood linking")
+    max_neighbors: int = Field(
+        default=5, ge=1, le=20, description="Maximum edges to create per node"
+    )
+    min_similarity: float = Field(
+        default=0.75, ge=0.0, le=1.0, description="Minimum cosine similarity to create an edge"
+    )
+    cross_label: bool = Field(
+        default=True, description="Search across all node types, not just same-label"
+    )
+    exclude_labels: list[str] = Field(
+        default_factory=list, description="Labels to skip during neighborhood search"
+    )
+
+
 class MemorySettings(BaseSettings):
     """
     Main configuration class for neo4j-agent-memory.
@@ -554,6 +576,7 @@ class MemorySettings(BaseSettings):
     search: SearchConfig = Field(default_factory=SearchConfig)
     geocoding: GeocodingConfig = Field(default_factory=GeocodingConfig)
     enrichment: EnrichmentConfig = Field(default_factory=EnrichmentConfig)
+    linker: LinkerConfig = Field(default_factory=LinkerConfig)
 
     @classmethod
     def from_dict(cls, config: dict[str, Any]) -> "MemorySettings":

@@ -382,6 +382,11 @@ class LongTermMemory(BaseMemory[Entity]):
         self._entity_types = entity_types or POLEO_TYPES
         self._strict_types = strict_types
         self._deduplication = deduplication or DeduplicationConfig()
+        self._linker: Any | None = None  # Injected by MemoryClient after init
+
+    def set_linker(self, linker: Any) -> None:
+        """Inject the GraphLinker (called by MemoryClient after connect)."""
+        self._linker = linker
 
     def _validate_entity_type(self, entity_type: str) -> str:
         """Validate and normalize entity type."""
@@ -647,6 +652,14 @@ class LongTermMemory(BaseMemory[Entity]):
             },
         )
 
+        # Semantic neighborhood linking
+        if pref.embedding and self._linker is not None:
+            await self._linker.link_to_neighborhood(
+                node_id=str(pref.id),
+                node_label="Preference",
+                embedding=pref.embedding,
+            )
+
         return pref
 
     async def add_fact(
@@ -711,6 +724,14 @@ class LongTermMemory(BaseMemory[Entity]):
                 "metadata": _serialize_metadata(fact.metadata),
             },
         )
+
+        # Semantic neighborhood linking
+        if fact.embedding and self._linker is not None:
+            await self._linker.link_to_neighborhood(
+                node_id=str(fact.id),
+                node_label="Fact",
+                embedding=fact.embedding,
+            )
 
         return fact
 

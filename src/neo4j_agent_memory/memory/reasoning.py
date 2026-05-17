@@ -347,6 +347,11 @@ class ReasoningMemory(BaseMemory[ReasoningStep]):
     ):
         """Initialize reasoning memory."""
         super().__init__(client, embedder, None, search_config, embedding_config)
+        self._linker: Any | None = None  # Injected by MemoryClient after init
+
+    def set_linker(self, linker: Any) -> None:
+        """Inject the GraphLinker (called by MemoryClient after connect)."""
+        self._linker = linker
 
     async def add(self, content: str, **kwargs: Any) -> ReasoningStep:
         """Add content as a reasoning step."""
@@ -423,6 +428,14 @@ class ReasoningMemory(BaseMemory[ReasoningStep]):
                     "trace_id": str(trace.id),
                     "message_id": msg_id_str,
                 },
+            )
+
+        # Semantic neighborhood linking
+        if trace.task_embedding and self._linker is not None:
+            await self._linker.link_to_neighborhood(
+                node_id=str(trace.id),
+                node_label="ReasoningTrace",
+                embedding=trace.task_embedding,
             )
 
         return trace

@@ -765,3 +765,51 @@ class MemoryCliService:
         if result is None:
             return {"error": f"{kind} not found", "id": entry_id}
         return to_jsonable(result)
+
+    async def link_neighbors(
+        self,
+        *,
+        label: str | None = None,
+        batch_size: int = 50,
+        max_neighbors: int | None = None,
+        min_similarity: float | None = None,
+        backfill: bool = False,
+    ) -> dict[str, Any]:
+        """Run semantic neighborhood linking (backfill or full)."""
+        linker = self.client.linker
+
+        if backfill:
+            total = await linker.backfill(
+                label=label,
+                batch_size=batch_size,
+                max_neighbors=max_neighbors,
+                min_similarity=min_similarity,
+            )
+            return {"action": "backfill", "edges_created": total, "label": label}
+
+        # Full pass: process all nodes with embeddings
+        from neo4j_agent_memory.graph.linker import VECTOR_INDEX_REGISTRY
+
+        labels_to_process = [label] if label else list(VECTOR_INDEX_REGISTRY.keys())
+        total_created = 0
+        for target_label in labels_to_process:
+            nodes = await self.client.graph.execute_read(
+                f"""
+                MATCH (n:{target_label})
+                WHERE n.embedding IS NOT NULL
+                RETURN n.id AS id, n.embedding AS embedding
+                LIMIT $batch_size
+                """,
+                {"batch_size": batch_size},
+            )
+            for node in nodes:
+                results = await linker.link_to_neighborhood(
+                    node_id=node["id"],
+                    node_label=target_label,
+                    embedding=node["embedding"],
+                    max_neighbors=max_neighbors,
+                    min_similarity=min_similarity,
+                )
+                total_created += sum(1 for r in results if r.created)
+
+        return {"action": "full", "edges_created": total_created, "label": label}
