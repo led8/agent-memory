@@ -88,6 +88,40 @@ Design references:
 - [V2 provenance design](docs/v2-graph-native-provenance.md)
 - [V2 roadmap and assumptions](.spark_utils/ideas_and_assumptions/20260414_agent_memory_v2_roadmap.md)
 
+## Semantic Neighborhood Linking
+
+The **GraphLinker** automatically creates `RELATES_TO` edges between semantically
+similar nodes when any embedded node is created. This turns isolated vector-store
+nodes into a connected knowledge graph with meaningful clusters.
+
+| Aspect | Detail |
+|--------|--------|
+| Trigger | Automatic on write (`add_fact`, `add_preference`, `add_message`, `start_trace`) |
+| Method | Cosine similarity via Neo4j vector indexes |
+| Defaults | max_neighbors=5, min_similarity=0.75 |
+| Scope | Cross-layer (Facts ↔ Preferences ↔ Messages ↔ Traces) |
+| Edge metadata | `similarity` score, `link_method`, `linked_at` |
+
+Configuration via `MemorySettings`:
+
+```python
+settings = MemorySettings(
+    neo4j={...},
+    linker={"enabled": True, "max_neighbors": 5, "min_similarity": 0.75},
+)
+```
+
+Backfill orphan nodes via CLI:
+
+```bash
+neo4j-agent-memory memory link-neighbors --backfill
+neo4j-agent-memory memory link-neighbors --backfill --label Fact --min-similarity 0.7
+```
+
+Design details:
+
+- [Graph Linker implementation](docs/graph-linker.md)
+
 ## Choose A Surface
 
 ### Python API
@@ -147,6 +181,7 @@ For coding work, the core commands are:
 - `list-candidates`
 - `accept-candidate`
 - `ignore-candidate`
+- `link-neighbors`
 - `list-pending-relations`
 - `review-relation`
 
