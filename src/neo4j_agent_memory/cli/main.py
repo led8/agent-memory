@@ -309,23 +309,20 @@ def extract(
         # Configure extractor type
         if extractor == "gliner":
             if model:
-                builder = builder.with_gliner(model_name=model)
+                builder = builder.with_gliner(model=model)
             else:
                 builder = builder.with_gliner()
         elif extractor == "llm":
             if model:
-                builder = builder.with_llm(model=model)
+                builder = builder.with_llm_fallback(model=model)
             else:
-                builder = builder.with_llm()
+                builder = builder.with_llm_fallback()
         elif extractor == "hybrid":
             builder = builder.with_gliner()
             if model:
-                builder = builder.with_llm(model=model)
+                builder = builder.with_llm_fallback(model=model)
             else:
-                builder = builder.with_llm()
-
-        # Set confidence threshold
-        builder = builder.with_confidence_threshold(confidence_threshold)
+                builder = builder.with_llm_fallback()
 
         ext = builder.build()
 
@@ -335,6 +332,27 @@ def extract(
             extract_relations=relations,
             extract_preferences=preferences,
         )
+
+        # Apply post-extraction confidence filter. We do this here rather
+        # than wiring a builder method because confidence semantics differ
+        # between extractors (GLiNER threshold filters during inference,
+        # spaCy/LLM emit confidence on the result). A uniform post-filter
+        # gives the user a single, predictable knob.
+        if confidence_threshold > 0:
+            result.entities = [
+                e for e in result.entities
+                if e.confidence >= confidence_threshold
+            ]
+            if result.relations:
+                result.relations = [
+                    r for r in result.relations
+                    if r.confidence >= confidence_threshold
+                ]
+            if result.preferences:
+                result.preferences = [
+                    p for p in result.preferences
+                    if p.confidence >= confidence_threshold
+                ]
 
         return result
 
@@ -460,17 +478,19 @@ def schemas_list(format: str, uri: str, user: str, password: str | None):
         )
         sys.exit(1)
 
-    from neo4j import AsyncGraphDatabase
-
+    from neo4j_agent_memory.config.settings import Neo4jConfig
+    from neo4j_agent_memory.graph.client import Neo4jClient
     from neo4j_agent_memory.schema import SchemaManager
 
     async def do_list():
-        driver = AsyncGraphDatabase.driver(uri, auth=(user, password))
+        config = Neo4jConfig(uri=uri, username=user, password=password)
+        client = Neo4jClient(config)
+        await client.connect()
         try:
-            manager = SchemaManager(driver)
+            manager = SchemaManager(client)
             return await manager.list_schemas()
         finally:
-            await driver.close()
+            await client.close()
 
     try:
         schema_list = run_async(do_list())
@@ -555,19 +575,21 @@ def schemas_show(
         error_console.print("[red]Error:[/red] Neo4j password required.")
         sys.exit(1)
 
-    from neo4j import AsyncGraphDatabase
-
+    from neo4j_agent_memory.config.settings import Neo4jConfig
+    from neo4j_agent_memory.graph.client import Neo4jClient
     from neo4j_agent_memory.schema import SchemaManager
 
     async def do_show():
-        driver = AsyncGraphDatabase.driver(uri, auth=(user, password))
+        config = Neo4jConfig(uri=uri, username=user, password=password)
+        client = Neo4jClient(config)
+        await client.connect()
         try:
-            manager = SchemaManager(driver)
+            manager = SchemaManager(client)
             if version:
                 return await manager.load_schema_version(name, version)
             return await manager.load_schema(name)
         finally:
-            await driver.close()
+            await client.close()
 
     try:
         schema_config = run_async(do_show())
@@ -641,19 +663,21 @@ def stats(format: str, uri: str, user: str, password: str | None):
         )
         sys.exit(1)
 
-    from neo4j import AsyncGraphDatabase
-
+    from neo4j_agent_memory.config.settings import Neo4jConfig
+    from neo4j_agent_memory.graph.client import Neo4jClient
     from neo4j_agent_memory.memory import LongTermMemory
 
     async def do_stats():
-        driver = AsyncGraphDatabase.driver(uri, auth=(user, password))
+        config = Neo4jConfig(uri=uri, username=user, password=password)
+        client = Neo4jClient(config)
+        await client.connect()
         try:
-            memory = LongTermMemory(driver)
+            memory = LongTermMemory(client)
             extraction_stats = await memory.get_extraction_stats()
             extractor_stats = await memory.get_extractor_stats()
             return extraction_stats, extractor_stats
         finally:
-            await driver.close()
+            await client.close()
 
     try:
         extraction_stats, extractor_stats = run_async(do_stats())
@@ -1333,6 +1357,17 @@ def memory_search(
 @click.option("--include-long-term/--no-include-long-term", default=True)
 @click.option("--include-reasoning/--no-include-reasoning", default=True)
 @click.option("--max-items", type=int, default=10, help="Maximum items per layer.")
+@click.option(
+    "--relevance-threshold",
+    type=click.FloatRange(0.0, 1.0),
+    default=None,
+    help=(
+        "Override the similarity threshold uniformly across all searches. "
+        "Default uses per-category recommendations from EmbeddingConfig "
+        "(BGE-small calibrated 2026-05-14: prefs 0.80, facts 0.85, "
+        "entities 0.83, messages 0.82, traces 0.83)."
+    ),
+)
 @click.pass_obj
 def memory_get_context(
     connection: MemoryCliConnection,
@@ -1342,6 +1377,7 @@ def memory_get_context(
     include_long_term: bool,
     include_reasoning: bool,
     max_items: int,
+    relevance_threshold: float | None,
 ):
     """Assemble combined context across the enabled memory layers."""
     payload = run_memory_operation(
@@ -1353,6 +1389,7 @@ def memory_get_context(
             include_long_term=include_long_term,
             include_reasoning=include_reasoning,
             max_items=max_items,
+            relevance_threshold=relevance_threshold,
         ),
     )
     echo_json(payload)
@@ -1368,6 +1405,7 @@ def memory_get_context(
 @click.option("--max-facts", type=int, default=5, help="Maximum durable facts.")
 @click.option("--max-entities", type=int, default=5, help="Maximum relevant entities.")
 @click.option("--max-traces", type=int, default=3, help="Maximum similar past tasks.")
+@click.option("--include-provenance", is_flag=True, default=False, help="Annotate facts/preferences with evidence source.")
 @click.pass_obj
 def memory_recall(
     connection: MemoryCliConnection,
@@ -1380,6 +1418,7 @@ def memory_recall(
     max_facts: int,
     max_entities: int,
     max_traces: int,
+    include_provenance: bool,
 ):
     """Assemble coding-oriented startup recall for one task session."""
     payload = run_memory_operation(
@@ -1394,6 +1433,7 @@ def memory_recall(
             max_facts=max_facts,
             max_entities=max_entities,
             max_traces=max_traces,
+            include_provenance=include_provenance,
         ),
     )
     echo_json(payload)
@@ -1406,6 +1446,132 @@ def memory_recall(
 def memory_delete(connection: MemoryCliConnection, kind: str, entry_id: str):
     """Delete one memory entry by UUID."""
     echo_json(run_memory_operation(connection, lambda service: service.delete(kind=kind, entry_id=entry_id)))
+
+
+@memory.command("list-candidates")
+@click.option("--status", type=click.Choice(["proposed", "accepted", "ignored", "expired"]), default=None)
+@click.option("--type", "candidate_type", type=click.Choice(["fact", "preference", "entity"]), default=None)
+@click.option("--scope", "scope_kind", type=click.Choice(["repo", "personal"]), default=None)
+@click.option("--limit", type=int, default=50)
+@click.pass_obj
+def memory_list_candidates(connection: MemoryCliConnection, status, candidate_type, scope_kind, limit):
+    """List long-term memory candidates pending review."""
+    echo_json(run_memory_operation(
+        connection,
+        lambda service: service.list_candidates(
+            status=status, candidate_type=candidate_type, scope_kind=scope_kind, limit=limit
+        ),
+    ))
+
+
+@memory.command("accept-candidate")
+@click.option("--id", "candidate_id", required=True, help="Candidate UUID.")
+@click.pass_obj
+def memory_accept_candidate(connection: MemoryCliConnection, candidate_id: str):
+    """Accept a candidate and mark it for persistence."""
+    echo_json(run_memory_operation(connection, lambda service: service.accept_candidate(candidate_id)))
+
+
+@memory.command("ignore-candidate")
+@click.option("--id", "candidate_id", required=True, help="Candidate UUID.")
+@click.pass_obj
+def memory_ignore_candidate(connection: MemoryCliConnection, candidate_id: str):
+    """Ignore a candidate (mark as not worth persisting)."""
+    echo_json(run_memory_operation(connection, lambda service: service.ignore_candidate(candidate_id)))
+
+
+@memory.command("get-candidate")
+@click.option("--id", "candidate_id", required=True, help="Candidate UUID.")
+@click.pass_obj
+def memory_get_candidate(connection: MemoryCliConnection, candidate_id: str):
+    """Inspect a single candidate by UUID."""
+    echo_json(run_memory_operation(connection, lambda service: service.get_candidate(candidate_id)))
+
+
+# =========================================================================
+# V2 Relation Review CLI
+# =========================================================================
+
+
+@memory.command("list-pending-relations")
+@click.option("--limit", default=50, help="Max relations to return.")
+@click.pass_obj
+def memory_list_pending_relations(connection: MemoryCliConnection, limit: int):
+    """List RELATED_TO relationships awaiting review."""
+    echo_json(run_memory_operation(connection, lambda service: service.list_pending_relations(limit=limit)))
+
+
+@memory.command("review-relation")
+@click.argument("source_id")
+@click.argument("target_id")
+@click.argument("relation_type")
+@click.option("--accept/--reject", default=True, help="Accept or reject the relation.")
+@click.option("--reviewed-by", default=None, help="Reviewer identifier.")
+@click.pass_obj
+def memory_review_relation(connection: MemoryCliConnection, source_id: str, target_id: str, relation_type: str, accept: bool, reviewed_by: str | None):
+    """Review (accept or reject) a pending relation."""
+    echo_json(run_memory_operation(
+        connection,
+        lambda service: service.review_relation(source_id, target_id, relation_type, accept=accept, reviewed_by=reviewed_by),
+    ))
+
+
+@memory.command("get-provenance")
+@click.argument("kind", type=click.Choice(["fact", "preference", "relation"]))
+@click.argument("entry_id_or_args", nargs=-1, required=True)
+@click.pass_obj
+def memory_get_provenance(connection: MemoryCliConnection, kind: str, entry_id_or_args: tuple):
+    """Get provenance for a fact, preference, or relation.
+
+    For fact/preference: get-provenance fact <ID>
+
+    For relation: get-provenance relation <SOURCE_ID> <TARGET_ID> <RELATION_TYPE>
+    """
+    if kind == "relation":
+        if len(entry_id_or_args) < 3:
+            raise click.UsageError("relation provenance requires: SOURCE_ID TARGET_ID RELATION_TYPE")
+        source_id, target_id, relation_type = entry_id_or_args[0], entry_id_or_args[1], entry_id_or_args[2]
+        echo_json(run_memory_operation(
+            connection,
+            lambda service: service.get_relation_provenance(source_id, target_id, relation_type),
+        ))
+    else:
+        entry_id = entry_id_or_args[0]
+        echo_json(run_memory_operation(
+            connection,
+            lambda service: service.get_provenance(kind, entry_id),
+        ))
+
+
+@memory.command("link-neighbors")
+@click.option("--label", default=None, help="Restrict to a label (Fact, Preference, Message, ReasoningTrace).")
+@click.option("--batch-size", default=50, type=int, help="Nodes to process per batch.")
+@click.option("--max-neighbors", default=None, type=int, help="Override max neighbors per node.")
+@click.option("--min-similarity", default=None, type=float, help="Override min similarity threshold.")
+@click.option("--backfill", is_flag=True, default=False, help="Only link nodes with no existing RELATES_TO edges.")
+@click.pass_obj
+def memory_link_neighbors(
+    connection: MemoryCliConnection,
+    label: str | None,
+    batch_size: int,
+    max_neighbors: int | None,
+    min_similarity: float | None,
+    backfill: bool,
+):
+    """Create semantic RELATES_TO edges between similar nodes.
+
+    By default processes all nodes. Use --backfill to only link orphan nodes.
+    """
+    def _run(service: MemoryCliService) -> dict:
+        return service.link_neighbors(
+            label=label,
+            batch_size=batch_size,
+            max_neighbors=max_neighbors,
+            min_similarity=min_similarity,
+            backfill=backfill,
+        )
+
+    echo_json(run_memory_operation(connection, _run))
 
 
 @cli.group()

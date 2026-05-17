@@ -621,6 +621,7 @@ class MemoryCliService:
         include_long_term: bool = True,
         include_reasoning: bool = True,
         max_items: int = 10,
+        relevance_threshold: float | None = None,
     ) -> dict[str, Any]:
         context = await self.client.get_context(
             query=query,
@@ -629,6 +630,7 @@ class MemoryCliService:
             include_long_term=include_long_term,
             include_reasoning=include_reasoning,
             max_items=max_items,
+            relevance_threshold=relevance_threshold,
         )
         return {
             "session_id": session_id,
@@ -649,6 +651,7 @@ class MemoryCliService:
         max_facts: int = 5,
         max_entities: int = 5,
         max_traces: int = 3,
+        include_provenance: bool = False,
     ) -> dict[str, Any]:
         coding_memory = self._coding_memory(repo=repo, task=task, session_id=session_id)
         context = await coding_memory.get_startup_recall(
@@ -658,6 +661,7 @@ class MemoryCliService:
             max_facts=max_facts,
             max_entities=max_entities,
             max_traces=max_traces,
+            include_provenance=include_provenance,
         )
         return {
             "repo": repo,
@@ -680,3 +684,132 @@ class MemoryCliService:
         label = label_map[kind]
         deleted = await self.client.graph.delete_node_by_id(label, entry_id)
         return {"kind": kind, "id": entry_id, "deleted": deleted}
+
+    # =========================================================================
+    # V2 Candidate Operations
+    # =========================================================================
+
+    async def list_candidates(
+        self,
+        *,
+        status: str | None = None,
+        candidate_type: str | None = None,
+        scope_kind: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        candidates = await self.client.long_term.list_candidates(
+            status=status,
+            candidate_type=candidate_type,
+            scope_kind=scope_kind,
+            limit=limit,
+        )
+        return {"candidates": [to_jsonable(c) for c in candidates], "count": len(candidates)}
+
+    async def accept_candidate(self, candidate_id: str) -> dict[str, Any]:
+        result = await self.client.long_term.accept_candidate(candidate_id)
+        if result is None:
+            return {"error": "candidate not found", "id": candidate_id}
+        return {"status": "accepted", "candidate": to_jsonable(result)}
+
+    async def ignore_candidate(self, candidate_id: str) -> dict[str, Any]:
+        result = await self.client.long_term.ignore_candidate(candidate_id)
+        if result is None:
+            return {"error": "candidate not found", "id": candidate_id}
+        return {"status": "ignored", "candidate": to_jsonable(result)}
+
+    async def get_candidate(self, candidate_id: str) -> dict[str, Any]:
+        result = await self.client.long_term.get_candidate(candidate_id)
+        if result is None:
+            return {"error": "candidate not found", "id": candidate_id}
+        return {"candidate": to_jsonable(result)}
+
+    # =========================================================================
+    # V2 Relation Review & Provenance Operations
+    # =========================================================================
+
+    async def list_pending_relations(self, *, limit: int = 50) -> dict[str, Any]:
+        relations = await self.client.long_term.list_pending_relations(limit=limit)
+        return {"relations": [to_jsonable(r) for r in relations], "count": len(relations)}
+
+    async def review_relation(
+        self,
+        source_id: str,
+        target_id: str,
+        relation_type: str,
+        *,
+        accept: bool = True,
+        reviewed_by: str | None = None,
+    ) -> dict[str, Any]:
+        result = await self.client.long_term.review_relation(
+            source_id, target_id, relation_type, accept=accept, reviewed_by=reviewed_by
+        )
+        if result is None:
+            return {"error": "relation not found", "source_id": source_id, "target_id": target_id}
+        return result
+
+    async def get_relation_provenance(
+        self, source_id: str, target_id: str, relation_type: str
+    ) -> dict[str, Any]:
+        result = await self.client.long_term.get_relation_provenance(source_id, target_id, relation_type)
+        if result is None:
+            return {"error": "relation not found", "source_id": source_id, "target_id": target_id}
+        return to_jsonable(result)
+
+    async def get_provenance(self, kind: str, entry_id: str) -> dict[str, Any]:
+        if kind == "fact":
+            result = await self.client.long_term.get_fact_provenance(entry_id)
+        elif kind == "preference":
+            result = await self.client.long_term.get_preference_provenance(entry_id)
+        else:
+            return {"error": f"unsupported kind: {kind}"}
+        if result is None:
+            return {"error": f"{kind} not found", "id": entry_id}
+        return to_jsonable(result)
+
+    async def link_neighbors(
+        self,
+        *,
+        label: str | None = None,
+        batch_size: int = 50,
+        max_neighbors: int | None = None,
+        min_similarity: float | None = None,
+        backfill: bool = False,
+    ) -> dict[str, Any]:
+        """Run semantic neighborhood linking (backfill or full)."""
+        linker = self.client.linker
+
+        if backfill:
+            total = await linker.backfill(
+                label=label,
+                batch_size=batch_size,
+                max_neighbors=max_neighbors,
+                min_similarity=min_similarity,
+            )
+            return {"action": "backfill", "edges_created": total, "label": label}
+
+        # Full pass: process all nodes with embeddings
+        from neo4j_agent_memory.graph.linker import VECTOR_INDEX_REGISTRY
+
+        labels_to_process = [label] if label else list(VECTOR_INDEX_REGISTRY.keys())
+        total_created = 0
+        for target_label in labels_to_process:
+            nodes = await self.client.graph.execute_read(
+                f"""
+                MATCH (n:{target_label})
+                WHERE n.embedding IS NOT NULL
+                RETURN n.id AS id, n.embedding AS embedding
+                LIMIT $batch_size
+                """,
+                {"batch_size": batch_size},
+            )
+            for node in nodes:
+                results = await linker.link_to_neighborhood(
+                    node_id=node["id"],
+                    node_label=target_label,
+                    embedding=node["embedding"],
+                    max_neighbors=max_neighbors,
+                    min_similarity=min_similarity,
+                )
+                total_created += sum(1 for r in results if r.created)
+
+        return {"action": "full", "edges_created": total_created, "label": label}

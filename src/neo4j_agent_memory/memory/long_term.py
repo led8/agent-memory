@@ -355,6 +355,8 @@ class LongTermMemory(BaseMemory[Entity]):
         entity_types: list[str] | None = None,
         strict_types: bool = False,
         deduplication: DeduplicationConfig | None = None,
+        search_config: "Any | None" = None,
+        embedding_config: "Any | None" = None,
     ):
         """Initialize long-term memory.
 
@@ -368,14 +370,23 @@ class LongTermMemory(BaseMemory[Entity]):
             entity_types: Allowed entity types (defaults to POLE+O)
             strict_types: If True, reject entities with unknown types
             deduplication: Optional deduplication configuration (defaults to enabled)
+            search_config: Optional ``SearchConfig`` for per-category threshold
+                resolution.
+            embedding_config: Optional ``EmbeddingConfig`` for fallback
+                threshold recommendations.
         """
-        super().__init__(client, embedder, extractor)
+        super().__init__(client, embedder, extractor, search_config, embedding_config)
         self._resolver = resolver
         self._geocoder = geocoder
         self._enrichment_service = enrichment_service
         self._entity_types = entity_types or POLEO_TYPES
         self._strict_types = strict_types
         self._deduplication = deduplication or DeduplicationConfig()
+        self._linker: Any | None = None  # Injected by MemoryClient after init
+
+    def set_linker(self, linker: Any) -> None:
+        """Inject the GraphLinker (called by MemoryClient after connect)."""
+        self._linker = linker
 
     def _validate_entity_type(self, entity_type: str) -> str:
         """Validate and normalize entity type."""
@@ -641,6 +652,14 @@ class LongTermMemory(BaseMemory[Entity]):
             },
         )
 
+        # Semantic neighborhood linking
+        if pref.embedding and self._linker is not None:
+            await self._linker.link_to_neighborhood(
+                node_id=str(pref.id),
+                node_label="Preference",
+                embedding=pref.embedding,
+            )
+
         return pref
 
     async def add_fact(
@@ -706,6 +725,14 @@ class LongTermMemory(BaseMemory[Entity]):
             },
         )
 
+        # Semantic neighborhood linking
+        if fact.embedding and self._linker is not None:
+            await self._linker.link_to_neighborhood(
+                node_id=str(fact.id),
+                node_label="Fact",
+                embedding=fact.embedding,
+            )
+
         return fact
 
     async def add_relationship(
@@ -716,9 +743,12 @@ class LongTermMemory(BaseMemory[Entity]):
         *,
         description: str | None = None,
         confidence: float = 1.0,
+        min_confidence: float = 0.0,
         valid_from: datetime | None = None,
         valid_until: datetime | None = None,
         attributes: dict[str, Any] | None = None,
+        source_message_id: str | UUID | None = None,
+        extractor_name: str | None = None,
     ) -> Relationship:
         """
         Add a relationship between entities.
@@ -729,9 +759,12 @@ class LongTermMemory(BaseMemory[Entity]):
             relationship_type: Type of relationship
             description: Optional description
             confidence: Confidence score
+            min_confidence: Threshold for active status (below = pending_review)
             valid_from: Start of validity
             valid_until: End of validity
             attributes: Optional additional attributes
+            source_message_id: ID of message that triggered extraction
+            extractor_name: Name of the extractor that produced the relation
 
         Returns:
             The created relationship
@@ -760,8 +793,11 @@ class LongTermMemory(BaseMemory[Entity]):
                 "relation_type": relationship_type,
                 "description": description,
                 "confidence": confidence,
+                "min_confidence": min_confidence,
                 "valid_from": valid_from.isoformat() if valid_from else None,
                 "valid_until": valid_until.isoformat() if valid_until else None,
+                "source_message_id": str(source_message_id) if source_message_id else None,
+                "extractor_name": extractor_name,
             },
         )
 
@@ -876,7 +912,7 @@ class LongTermMemory(BaseMemory[Entity]):
         *,
         entity_types: list[EntityType | str] | None = None,
         limit: int = 10,
-        threshold: float = 0.7,
+        threshold: float | None = None,
     ) -> list[Entity]:
         """
         Search for entities by semantic similarity.
@@ -885,13 +921,16 @@ class LongTermMemory(BaseMemory[Entity]):
             query: Search query
             entity_types: Optional filter by entity types
             limit: Maximum results
-            threshold: Minimum similarity threshold
+            threshold: Minimum similarity threshold. ``None`` resolves via
+                settings; ``0.0`` is a valid "no filtering" override.
 
         Returns:
             List of matching entities
         """
         if self._embedder is None:
             return []
+
+        threshold = self._resolve_threshold("entity", threshold)
 
         query_embedding = await self._embedder.embed(query)
 
@@ -959,7 +998,7 @@ class LongTermMemory(BaseMemory[Entity]):
         *,
         category: str | None = None,
         limit: int = 10,
-        threshold: float = 0.7,
+        threshold: float | None = None,
         include_superseded: bool = False,
     ) -> list[Preference]:
         """
@@ -969,7 +1008,8 @@ class LongTermMemory(BaseMemory[Entity]):
             query: Search query
             category: Optional filter by category
             limit: Maximum results
-            threshold: Minimum similarity threshold
+            threshold: Minimum similarity threshold. ``None`` resolves via
+                settings; ``0.0`` is a valid "no filtering" override.
 
         Returns:
             List of matching preferences
@@ -988,6 +1028,8 @@ class LongTermMemory(BaseMemory[Entity]):
                     ]
                 return preferences
             return []
+
+        threshold = self._resolve_threshold("preference", threshold)
 
         query_embedding = await self._embedder.embed(query)
 
@@ -1126,6 +1168,9 @@ class LongTermMemory(BaseMemory[Entity]):
             include_preferences: Whether to include preferences
             include_facts: Whether to include facts
             max_items: Maximum items per category
+            relevance_threshold: Optional explicit threshold override forwarded
+                uniformly to ``search_preferences``, ``search_facts``, and
+                ``search_entities``. ``None`` resolves per-category via settings.
 
         Returns:
             Formatted context string
@@ -1134,31 +1179,45 @@ class LongTermMemory(BaseMemory[Entity]):
         include_preferences = kwargs.get("include_preferences", True)
         include_facts = kwargs.get("include_facts", True)
         max_items = kwargs.get("max_items", 10)
+        relevance_threshold = kwargs.get("relevance_threshold")
 
         parts = []
 
         # Get relevant preferences
         if include_preferences:
-            preferences = await self.search_preferences(query, limit=max_items)
+            preferences = await self.search_preferences(
+                query, limit=max_items, threshold=relevance_threshold
+            )
             if preferences:
                 parts.append("### User Preferences")
                 for pref in preferences:
                     line = f"- [{pref.category}] {pref.preference}"
                     if pref.context:
                         line += f" (context: {pref.context})"
+                    score = (pref.metadata or {}).get("similarity")
+                    if score is not None:
+                        line += f" (relevance: {score:.2f})"
                     parts.append(line)
 
         # Get relevant facts
         if include_facts:
-            facts = await self.search_facts(query, limit=max_items)
+            facts = await self.search_facts(
+                query, limit=max_items, threshold=relevance_threshold
+            )
             if facts:
                 parts.append("\n### Relevant Facts")
                 for fact in facts:
-                    parts.append(f"- {fact.subject} {fact.predicate} {fact.object}")
+                    line = f"- {fact.subject} {fact.predicate} {fact.object}"
+                    score = (fact.metadata or {}).get("similarity")
+                    if score is not None:
+                        line += f" (relevance: {score:.2f})"
+                    parts.append(line)
 
         # Get relevant entities
         if include_entities:
-            entities = await self.search_entities(query, limit=max_items)
+            entities = await self.search_entities(
+                query, limit=max_items, threshold=relevance_threshold
+            )
             if entities:
                 parts.append("\n### Relevant Entities")
                 for entity in entities:
@@ -1166,6 +1225,9 @@ class LongTermMemory(BaseMemory[Entity]):
                     line = f"- {entity.display_name} ({type_str})"
                     if entity.description:
                         line += f": {entity.description}"
+                    score = (entity.metadata or {}).get("similarity")
+                    if score is not None:
+                        line += f" (relevance: {score:.2f})"
                     parts.append(line)
 
         return "\n".join(parts)
@@ -1960,7 +2022,7 @@ class LongTermMemory(BaseMemory[Entity]):
         query: str,
         *,
         limit: int = 10,
-        threshold: float = 0.7,
+        threshold: float | None = None,
         include_superseded: bool = False,
     ) -> list[Fact]:
         """
@@ -1969,7 +2031,8 @@ class LongTermMemory(BaseMemory[Entity]):
         Args:
             query: Search query
             limit: Maximum results
-            threshold: Minimum similarity threshold
+            threshold: Minimum similarity threshold. ``None`` resolves via
+                settings; ``0.0`` is a valid "no filtering" override.
 
         Returns:
             List of matching facts
@@ -1980,6 +2043,8 @@ class LongTermMemory(BaseMemory[Entity]):
                 limit=limit,
                 include_superseded=include_superseded,
             )
+
+        threshold = self._resolve_threshold("fact", threshold)
 
         query_embedding = await self._embedder.embed(query)
 
@@ -2155,6 +2220,257 @@ class LongTermMemory(BaseMemory[Entity]):
         )
         return True
 
+    # =========================================================================
+    # V2 Durable Provenance
+    # =========================================================================
+
+    async def link_fact_to_evidence(
+        self,
+        fact_id: UUID | str,
+        evidence_id: UUID | str,
+        *,
+        evidence_type: str = "message",
+        confidence: float = 1.0,
+    ) -> bool:
+        """Link a fact to evidence that supports it via SUPPORTED_BY.
+
+        Args:
+            fact_id: ID of the fact
+            evidence_id: ID of the evidence node (Message, ReasoningTrace, or ToolCall)
+            evidence_type: Type of evidence ('message', 'reasoning_trace', 'tool_call')
+            confidence: Confidence that this evidence supports the fact
+
+        Returns:
+            True if the link was created/updated
+        """
+        fact_id_str = str(fact_id)
+        evidence_id_str = str(evidence_id)
+
+        query_map = {
+            "message": queries.LINK_FACT_SUPPORTED_BY_MESSAGE,
+            "reasoning_trace": queries.LINK_FACT_SUPPORTED_BY_TRACE,
+            "tool_call": queries.LINK_FACT_SUPPORTED_BY_TOOL_CALL,
+        }
+        query = query_map.get(evidence_type)
+        if query is None:
+            raise ValueError(
+                f"Unsupported evidence_type: {evidence_type}. "
+                f"Must be one of: {list(query_map.keys())}"
+            )
+
+        results = await self._client.execute_write(
+            query,
+            {
+                "fact_id": fact_id_str,
+                "evidence_id": evidence_id_str,
+                "confidence": confidence,
+            },
+        )
+        return bool(results)
+
+    async def link_preference_to_evidence(
+        self,
+        preference_id: UUID | str,
+        evidence_id: UUID | str,
+        *,
+        evidence_type: str = "message",
+        confidence: float = 1.0,
+    ) -> bool:
+        """Link a preference to evidence it was derived from via DERIVED_FROM.
+
+        Args:
+            preference_id: ID of the preference
+            evidence_id: ID of the evidence node (Message or ReasoningTrace)
+            evidence_type: Type of evidence ('message', 'reasoning_trace')
+            confidence: Confidence that this evidence produced the preference
+
+        Returns:
+            True if the link was created/updated
+        """
+        preference_id_str = str(preference_id)
+        evidence_id_str = str(evidence_id)
+
+        query_map = {
+            "message": queries.LINK_PREFERENCE_DERIVED_FROM_MESSAGE,
+            "reasoning_trace": queries.LINK_PREFERENCE_DERIVED_FROM_TRACE,
+        }
+        query = query_map.get(evidence_type)
+        if query is None:
+            raise ValueError(
+                f"Unsupported evidence_type: {evidence_type}. "
+                f"Must be one of: {list(query_map.keys())}"
+            )
+
+        results = await self._client.execute_write(
+            query,
+            {
+                "preference_id": preference_id_str,
+                "evidence_id": evidence_id_str,
+                "confidence": confidence,
+            },
+        )
+        return bool(results)
+
+    async def link_fact_to_entity(
+        self,
+        fact_id: UUID | str,
+        entity_id: UUID | str,
+        *,
+        link_type: str = "manual",
+    ) -> bool:
+        """Link a fact to an entity via ABOUT.
+
+        Args:
+            fact_id: ID of the fact
+            entity_id: ID of the entity
+            link_type: How the link was established ('manual', 'subject_match', 'object_match')
+
+        Returns:
+            True if the link was created
+        """
+        results = await self._client.execute_write(
+            queries.LINK_FACT_ABOUT_ENTITY,
+            {
+                "fact_id": str(fact_id),
+                "entity_id": str(entity_id),
+                "link_type": link_type,
+            },
+        )
+        return bool(results)
+
+    async def auto_link_fact_to_entities(
+        self,
+        fact_id: UUID | str,
+    ) -> list[dict[str, Any]]:
+        """Automatically link a fact to entities matching its subject/object.
+
+        Searches for entities whose name, canonical_name, or aliases match the
+        fact's subject or object fields, and creates ABOUT edges for each match.
+
+        Args:
+            fact_id: ID of the fact to link
+
+        Returns:
+            List of dicts with keys: entity_id, entity_name, match_role
+        """
+        fact_id_str = str(fact_id)
+
+        results = await self._client.execute_read(
+            queries.FIND_ENTITIES_FOR_FACT_LINKING,
+            {"fact_id": fact_id_str},
+        )
+
+        linked: list[dict[str, Any]] = []
+        for row in results:
+            entity_id = row["entity_id"]
+            match_role = row["match_role"]
+            await self.link_fact_to_entity(
+                fact_id_str,
+                entity_id,
+                link_type=f"{match_role}_match",
+            )
+            linked.append(
+                {
+                    "entity_id": entity_id,
+                    "entity_name": row["entity_name"],
+                    "match_role": match_role,
+                }
+            )
+        return linked
+
+    async def get_fact_provenance(
+        self,
+        fact_id: UUID | str,
+    ) -> dict[str, Any]:
+        """Get the full evidence chain for a fact.
+
+        Returns provenance including supporting messages, reasoning traces,
+        tool calls, and linked entities.
+
+        Args:
+            fact_id: ID of the fact
+
+        Returns:
+            Dict with keys: fact, messages, traces, tool_calls, entities
+        """
+        results = await self._client.execute_read(
+            queries.GET_FACT_PROVENANCE,
+            {"fact_id": str(fact_id)},
+        )
+        if not results:
+            return {"fact": None, "messages": [], "traces": [], "tool_calls": [], "entities": []}
+
+        row = results[0]
+        return {
+            "fact": self._parse_fact(dict(row["f"])),
+            "messages": [m for m in row.get("messages", []) if m is not None],
+            "traces": [t for t in row.get("traces", []) if t is not None],
+            "tool_calls": [tc for tc in row.get("tool_calls", []) if tc is not None],
+            "entities": [e for e in row.get("entities", []) if e is not None],
+        }
+
+    async def get_preference_provenance(
+        self,
+        preference_id: UUID | str,
+    ) -> dict[str, Any]:
+        """Get the full evidence chain for a preference.
+
+        Returns provenance including source messages, reasoning traces,
+        and linked entities.
+
+        Args:
+            preference_id: ID of the preference
+
+        Returns:
+            Dict with keys: preference, messages, traces, entities
+        """
+        results = await self._client.execute_read(
+            queries.GET_PREFERENCE_PROVENANCE,
+            {"preference_id": str(preference_id)},
+        )
+        if not results:
+            return {"preference": None, "messages": [], "traces": [], "entities": []}
+
+        row = results[0]
+        return {
+            "preference": self._parse_preference(dict(row["p"])),
+            "messages": [m for m in row.get("messages", []) if m is not None],
+            "traces": [t for t in row.get("traces", []) if t is not None],
+            "entities": [e for e in row.get("entities", []) if e is not None],
+        }
+
+    async def get_entity_facts(
+        self,
+        entity_id: UUID | str,
+        *,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Get all facts linked to an entity via ABOUT.
+
+        Args:
+            entity_id: ID of the entity
+            limit: Maximum facts to return
+
+        Returns:
+            List of dicts with keys: fact, link_type, linked_at
+        """
+        results = await self._client.execute_read(
+            queries.GET_ENTITY_FACTS,
+            {"entity_id": str(entity_id), "limit": limit},
+        )
+        items: list[dict[str, Any]] = []
+        for row in results:
+            items.append(
+                {
+                    "fact": self._parse_fact(dict(row["f"])),
+                    "link_type": row.get("link_type"),
+                    "linked_at": _to_python_datetime(row.get("linked_at"))
+                    if row.get("linked_at")
+                    else None,
+                }
+            )
+        return items
+
     async def get_entity_relationships(
         self,
         entity_name: str,
@@ -2174,6 +2490,124 @@ class LongTermMemory(BaseMemory[Entity]):
             return []
 
         return await self.get_related_entities(entity)
+
+    # =========================================================================
+    # V2 Relation Review & Provenance
+    # =========================================================================
+
+    async def list_pending_relations(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        """List relations with status 'pending_review'.
+
+        Returns:
+            List of relation dicts with source/target info and provenance
+        """
+        results = await self._client.execute_read(
+            queries.LIST_PENDING_RELATIONS,
+            {"limit": limit},
+        )
+        relations = []
+        for row in results:
+            relations.append({
+                "source_id": row.get("source_id"),
+                "source_name": row.get("source_name"),
+                "target_id": row.get("target_id"),
+                "target_name": row.get("target_name"),
+                "relation_type": row.get("relation_type") or row.get("type"),
+                "confidence": row.get("confidence"),
+                "source_message_id": row.get("source_message_id"),
+                "extractor_name": row.get("extractor_name"),
+                "extracted_at": _to_python_datetime(row.get("extracted_at"))
+                if row.get("extracted_at") else None,
+                "created_at": _to_python_datetime(row.get("created_at"))
+                if row.get("created_at") else None,
+            })
+        return relations
+
+    async def review_relation(
+        self,
+        source_id: str | UUID,
+        target_id: str | UUID,
+        relation_type: str,
+        *,
+        accept: bool = True,
+        reviewed_by: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Accept or reject a pending relation.
+
+        Args:
+            source_id: Source entity ID
+            target_id: Target entity ID
+            relation_type: The relation type to review
+            accept: True to accept (set active), False to reject
+            reviewed_by: Optional reviewer identifier
+
+        Returns:
+            Updated relation dict, or None if not found
+        """
+        query = (
+            queries.REVIEW_RELATION_ACCEPT if accept else queries.REVIEW_RELATION_REJECT
+        )
+        results = await self._client.execute_write(
+            query,
+            {
+                "source_id": str(source_id),
+                "target_id": str(target_id),
+                "relation_type": relation_type,
+                "reviewed_by": reviewed_by,
+            },
+        )
+        if not results:
+            return None
+
+        return {
+            "source_id": str(source_id),
+            "target_id": str(target_id),
+            "relation_type": relation_type,
+            "status": "active" if accept else "rejected",
+            "reviewed_by": reviewed_by,
+        }
+
+    async def get_relation_provenance(
+        self,
+        source_id: str | UUID,
+        target_id: str | UUID,
+        relation_type: str,
+    ) -> dict[str, Any] | None:
+        """Get provenance information for a specific relation.
+
+        Returns:
+            Dict with relation details and provenance, or None if not found
+        """
+        results = await self._client.execute_read(
+            queries.GET_RELATION_PROVENANCE,
+            {
+                "source_id": str(source_id),
+                "target_id": str(target_id),
+                "relation_type": relation_type,
+            },
+        )
+        if not results:
+            return None
+
+        row = results[0]
+        return {
+            "source_id": row.get("source_id"),
+            "source_name": row.get("source_name"),
+            "target_id": row.get("target_id"),
+            "target_name": row.get("target_name"),
+            "relation_type": row.get("relation_type"),
+            "confidence": row.get("confidence"),
+            "status": row.get("status"),
+            "source_message_id": row.get("source_message_id"),
+            "extractor_name": row.get("extractor_name"),
+            "extracted_at": _to_python_datetime(row.get("extracted_at"))
+            if row.get("extracted_at") else None,
+            "reviewed_at": _to_python_datetime(row.get("reviewed_at"))
+            if row.get("reviewed_at") else None,
+            "reviewed_by": row.get("reviewed_by"),
+            "created_at": _to_python_datetime(row.get("created_at"))
+            if row.get("created_at") else None,
+        }
 
     def _parse_entity(self, data: dict[str, Any]) -> Entity:
         """Parse entity from database result."""
@@ -2445,3 +2879,306 @@ class LongTermMemory(BaseMemory[Entity]):
 
         row = results[0]
         return (row["latitude"], row["longitude"])
+
+    # =========================================================================
+    # V2 Candidate Persistence
+    # =========================================================================
+
+    async def store_candidate(
+        self,
+        *,
+        candidate_type: str,
+        scope_kind: str,
+        content: str,
+        why_candidate: str,
+        source: str,
+        confidence: str,
+        evidence: str,
+        suggested_action: str,
+        payload: dict[str, Any],
+        proposed_by_trace_id: str | UUID | None = None,
+        proposed_by_message_id: str | UUID | None = None,
+    ) -> dict[str, Any]:
+        """Persist a long-term memory candidate as a graph node.
+
+        Args:
+            candidate_type: Type of candidate ('fact', 'preference', 'entity')
+            scope_kind: Scope ('repo', 'personal')
+            content: Human-readable summary
+            why_candidate: Justification for the candidate
+            source: Evidence origin (user_explicit, code_verified, etc.)
+            confidence: Confidence level (high, medium, low)
+            evidence: Concrete evidence string
+            suggested_action: Action to take (remember_fact, etc.)
+            payload: Serialized parameters for the remember_* method
+            proposed_by_trace_id: Optional trace that proposed this candidate
+            proposed_by_message_id: Optional message that triggered the candidate
+
+        Returns:
+            Dict with candidate properties including id and status
+        """
+        candidate_id = str(uuid4())
+        payload_json = json.dumps(payload, default=str)
+
+        results = await self._client.execute_write(
+            queries.CREATE_CANDIDATE,
+            {
+                "id": candidate_id,
+                "type": candidate_type,
+                "scope_kind": scope_kind,
+                "content": content,
+                "why_candidate": why_candidate,
+                "source": source,
+                "confidence": confidence,
+                "evidence": evidence,
+                "suggested_action": suggested_action,
+                "payload": payload_json,
+            },
+        )
+
+        # Create PROPOSED_BY edge if context is available
+        if proposed_by_trace_id is not None:
+            await self._client.execute_write(
+                queries.LINK_CANDIDATE_PROPOSED_BY_TRACE,
+                {
+                    "candidate_id": candidate_id,
+                    "source_id": str(proposed_by_trace_id),
+                },
+            )
+        elif proposed_by_message_id is not None:
+            await self._client.execute_write(
+                queries.LINK_CANDIDATE_PROPOSED_BY_MESSAGE,
+                {
+                    "candidate_id": candidate_id,
+                    "source_id": str(proposed_by_message_id),
+                },
+            )
+
+        if results:
+            node = results[0]["c"]
+            return self._candidate_node_to_dict(node, candidate_id)
+
+        return {"id": candidate_id, "status": "proposed"}
+
+    async def get_candidate(self, candidate_id: str | UUID) -> dict[str, Any] | None:
+        """Retrieve a single candidate by ID.
+
+        Returns:
+            Dict with candidate properties, or None if not found
+        """
+        results = await self._client.execute_read(
+            queries.GET_CANDIDATE,
+            {"id": str(candidate_id)},
+        )
+        if not results:
+            return None
+
+        node = results[0]["c"]
+        return self._candidate_node_to_dict(node, str(candidate_id))
+
+    async def list_candidates(
+        self,
+        *,
+        status: str | None = None,
+        candidate_type: str | None = None,
+        scope_kind: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """List candidates with optional filters.
+
+        Args:
+            status: Filter by status ('proposed', 'accepted', 'ignored', 'expired')
+            candidate_type: Filter by type ('fact', 'preference', 'entity')
+            scope_kind: Filter by scope ('repo', 'personal')
+            limit: Max results (default 50)
+
+        Returns:
+            List of candidate dicts
+        """
+        results = await self._client.execute_read(
+            queries.LIST_CANDIDATES,
+            {
+                "status": status,
+                "type": candidate_type,
+                "scope_kind": scope_kind,
+                "limit": limit,
+            },
+        )
+        candidates = []
+        for row in results:
+            node = row["c"]
+            cid = node.get("id", "") if hasattr(node, "get") else getattr(node, "id", "")
+            candidates.append(self._candidate_node_to_dict(node, cid))
+        return candidates
+
+    async def accept_candidate(
+        self,
+        candidate_id: str | UUID,
+        *,
+        reviewed_by: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Accept a candidate: set status to 'accepted'.
+
+        The caller is responsible for calling the appropriate remember_*()
+        method with the candidate's payload. This method only updates status.
+
+        Args:
+            candidate_id: ID of the candidate to accept
+            reviewed_by: Optional reviewer identifier
+
+        Returns:
+            Updated candidate dict, or None if not found
+        """
+        results = await self._client.execute_write(
+            queries.UPDATE_CANDIDATE_STATUS,
+            {
+                "id": str(candidate_id),
+                "status": "accepted",
+                "reviewed_by": reviewed_by,
+            },
+        )
+        if not results:
+            return None
+
+        node = results[0]["c"]
+        return self._candidate_node_to_dict(node, str(candidate_id))
+
+    async def ignore_candidate(
+        self,
+        candidate_id: str | UUID,
+        *,
+        reviewed_by: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Ignore a candidate: set status to 'ignored'.
+
+        Args:
+            candidate_id: ID of the candidate to ignore
+            reviewed_by: Optional reviewer identifier
+
+        Returns:
+            Updated candidate dict, or None if not found
+        """
+        results = await self._client.execute_write(
+            queries.UPDATE_CANDIDATE_STATUS,
+            {
+                "id": str(candidate_id),
+                "status": "ignored",
+                "reviewed_by": reviewed_by,
+            },
+        )
+        if not results:
+            return None
+
+        node = results[0]["c"]
+        return self._candidate_node_to_dict(node, str(candidate_id))
+
+    async def expire_candidate(
+        self,
+        candidate_id: str | UUID,
+        *,
+        reviewed_by: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Expire a candidate: set status to 'expired'.
+
+        Args:
+            candidate_id: ID of the candidate to expire
+            reviewed_by: Optional reviewer identifier
+
+        Returns:
+            Updated candidate dict, or None if not found
+        """
+        results = await self._client.execute_write(
+            queries.UPDATE_CANDIDATE_STATUS,
+            {
+                "id": str(candidate_id),
+                "status": "expired",
+                "reviewed_by": reviewed_by,
+            },
+        )
+        if not results:
+            return None
+
+        node = results[0]["c"]
+        return self._candidate_node_to_dict(node, str(candidate_id))
+
+    async def delete_candidate(self, candidate_id: str | UUID) -> bool:
+        """Delete a candidate node and its relationships.
+
+        Returns:
+            True if the candidate was deleted
+        """
+        results = await self._client.execute_write(
+            queries.DELETE_CANDIDATE,
+            {"id": str(candidate_id)},
+        )
+        if results:
+            return results[0].get("deleted", 0) > 0
+        return False
+
+    async def get_candidate_provenance(
+        self, candidate_id: str | UUID
+    ) -> dict[str, Any] | None:
+        """Get provenance for a candidate (what proposed it).
+
+        Returns:
+            Dict with candidate info and linked traces/messages, or None
+        """
+        results = await self._client.execute_read(
+            queries.GET_CANDIDATE_PROVENANCE,
+            {"candidate_id": str(candidate_id)},
+        )
+        if not results:
+            return None
+
+        row = results[0]
+        node = row["c"]
+        cid = node.get("id", "") if hasattr(node, "get") else getattr(node, "id", "")
+        candidate = self._candidate_node_to_dict(node, cid)
+        candidate["proposed_by_traces"] = [
+            t for t in (row.get("traces") or []) if t is not None
+        ]
+        candidate["proposed_by_messages"] = [
+            m for m in (row.get("messages") or []) if m is not None
+        ]
+        return candidate
+
+    @staticmethod
+    def _candidate_node_to_dict(node: Any, candidate_id: str) -> dict[str, Any]:
+        """Convert a Neo4j candidate node to a plain dict."""
+        if hasattr(node, "get"):
+            get = node.get
+        elif hasattr(node, "_properties"):
+            get = node._properties.get
+        else:
+            get = lambda k, d=None: getattr(node, k, d)  # noqa: E731
+
+        payload_raw = get("payload", "{}")
+        try:
+            payload = json.loads(payload_raw) if isinstance(payload_raw, str) else payload_raw
+        except (json.JSONDecodeError, TypeError):
+            payload = {}
+
+        reviewed_at = get("reviewed_at", None)
+        if reviewed_at and hasattr(reviewed_at, "to_native"):
+            reviewed_at = reviewed_at.to_native()
+
+        created_at = get("created_at", None)
+        if created_at and hasattr(created_at, "to_native"):
+            created_at = created_at.to_native()
+
+        return {
+            "id": candidate_id,
+            "type": get("type", None),
+            "scope_kind": get("scope_kind", None),
+            "content": get("content", None),
+            "why_candidate": get("why_candidate", None),
+            "source": get("source", None),
+            "confidence": get("confidence", None),
+            "evidence": get("evidence", None),
+            "suggested_action": get("suggested_action", None),
+            "payload": payload,
+            "status": get("status", "proposed"),
+            "created_at": created_at,
+            "reviewed_at": reviewed_at,
+            "reviewed_by": get("reviewed_by", None),
+        }

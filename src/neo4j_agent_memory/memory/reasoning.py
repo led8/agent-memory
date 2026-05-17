@@ -342,9 +342,16 @@ class ReasoningMemory(BaseMemory[ReasoningStep]):
         self,
         client: "Neo4jClient",
         embedder: "Embedder | None" = None,
+        search_config: "Any | None" = None,
+        embedding_config: "Any | None" = None,
     ):
         """Initialize reasoning memory."""
-        super().__init__(client, embedder, None)
+        super().__init__(client, embedder, None, search_config, embedding_config)
+        self._linker: Any | None = None  # Injected by MemoryClient after init
+
+    def set_linker(self, linker: Any) -> None:
+        """Inject the GraphLinker (called by MemoryClient after connect)."""
+        self._linker = linker
 
     async def add(self, content: str, **kwargs: Any) -> ReasoningStep:
         """Add content as a reasoning step."""
@@ -421,6 +428,14 @@ class ReasoningMemory(BaseMemory[ReasoningStep]):
                     "trace_id": str(trace.id),
                     "message_id": msg_id_str,
                 },
+            )
+
+        # Semantic neighborhood linking
+        if trace.task_embedding and self._linker is not None:
+            await self._linker.link_to_neighborhood(
+                node_id=str(trace.id),
+                node_label="ReasoningTrace",
+                embedding=trace.task_embedding,
             )
 
         return trace
@@ -743,7 +758,7 @@ class ReasoningMemory(BaseMemory[ReasoningStep]):
         *,
         limit: int = 5,
         success_only: bool = True,
-        threshold: float = 0.7,
+        threshold: float | None = None,
     ) -> list[ReasoningTrace]:
         """
         Find similar past reasoning traces.
@@ -752,7 +767,8 @@ class ReasoningMemory(BaseMemory[ReasoningStep]):
             task: Task description to match
             limit: Maximum number of results
             success_only: Only return successful traces
-            threshold: Minimum similarity threshold
+            threshold: Minimum similarity threshold. ``None`` resolves via
+                settings; ``0.0`` is a valid "no filtering" override.
 
         Returns:
             List of similar reasoning traces
@@ -763,6 +779,8 @@ class ReasoningMemory(BaseMemory[ReasoningStep]):
                 limit=limit,
                 success_only=success_only,
             )
+
+        threshold = self._resolve_threshold("trace", threshold)
 
         task_embedding = await self._embedder.embed(task)
 
@@ -977,14 +995,22 @@ class ReasoningMemory(BaseMemory[ReasoningStep]):
             query: Task description to find similar traces
             max_traces: Maximum traces to include
             include_successful_only: Only include successful traces
+            relevance_threshold: Optional explicit threshold override.
+                ``None`` resolves via settings.
 
         Returns:
             Formatted context string
         """
         max_traces = kwargs.get("max_traces", 3)
         success_only = kwargs.get("include_successful_only", True)
+        relevance_threshold = kwargs.get("relevance_threshold")
 
-        traces = await self.get_similar_traces(query, limit=max_traces, success_only=success_only)
+        traces = await self.get_similar_traces(
+            query,
+            limit=max_traces,
+            success_only=success_only,
+            threshold=relevance_threshold,
+        )
 
         if not traces:
             return ""
@@ -998,7 +1024,7 @@ class ReasoningMemory(BaseMemory[ReasoningStep]):
             details = self._summarize_trace_details(trace_for_context)
             parts.append(f"**Task**: {trace.task}")
             if similarity is not None:
-                parts.append(f"- Similarity: {similarity:.2f}")
+                parts.append(f"- Relevance: {similarity:.2f}")
             elif text_overlap is not None:
                 parts.append(f"- Text overlap: {text_overlap}")
             if trace.outcome:
@@ -1193,6 +1219,166 @@ class ReasoningMemory(BaseMemory[ReasoningStep]):
             )
             traces.append(trace)
 
+        return traces
+
+    # =========================================================================
+    # V2 Reasoning-to-Durable Linking
+    # =========================================================================
+
+    async def link_trace_to_outcome(
+        self,
+        trace_id: UUID | str,
+        target_id: UUID | str,
+        *,
+        target_type: str = "fact",
+        step_number: int | None = None,
+    ) -> bool:
+        """Link a reasoning trace to a durable memory it produced via PRODUCED.
+
+        Args:
+            trace_id: ID of the reasoning trace
+            target_id: ID of the produced memory (Fact, Preference, or Entity)
+            target_type: Type of target ('fact', 'preference', 'entity')
+            step_number: Optional step number during which the outcome was produced
+
+        Returns:
+            True if the link was created/updated
+        """
+        query_map = {
+            "fact": queries.LINK_TRACE_PRODUCED_FACT,
+            "preference": queries.LINK_TRACE_PRODUCED_PREFERENCE,
+            "entity": queries.LINK_TRACE_PRODUCED_ENTITY,
+        }
+        query = query_map.get(target_type)
+        if query is None:
+            raise ValueError(
+                f"Unsupported target_type: {target_type}. "
+                f"Must be one of: {list(query_map.keys())}"
+            )
+
+        results = await self._client.execute_write(
+            query,
+            {
+                "trace_id": str(trace_id),
+                "target_id": str(target_id),
+                "step_number": step_number,
+            },
+        )
+        return bool(results)
+
+    async def link_step_to_entity(
+        self,
+        step_id: UUID | str,
+        entity_id: UUID | str,
+    ) -> bool:
+        """Link a reasoning step to an entity it's about via ABOUT.
+
+        Args:
+            step_id: ID of the reasoning step
+            entity_id: ID of the entity
+
+        Returns:
+            True if the link was created
+        """
+        results = await self._client.execute_write(
+            queries.LINK_STEP_ABOUT_ENTITY,
+            {
+                "step_id": str(step_id),
+                "entity_id": str(entity_id),
+            },
+        )
+        return bool(results)
+
+    async def link_tool_call_to_fact(
+        self,
+        tool_call_id: UUID | str,
+        fact_id: UUID | str,
+    ) -> bool:
+        """Link a tool call to a fact it observed via OBSERVED.
+
+        Args:
+            tool_call_id: ID of the tool call
+            fact_id: ID of the fact that was observed
+
+        Returns:
+            True if the link was created
+        """
+        results = await self._client.execute_write(
+            queries.LINK_TOOL_CALL_OBSERVED_FACT,
+            {
+                "tool_call_id": str(tool_call_id),
+                "fact_id": str(fact_id),
+            },
+        )
+        return bool(results)
+
+    async def get_trace_outcomes(
+        self,
+        trace_id: UUID | str,
+    ) -> list[dict[str, Any]]:
+        """Get all durable memories produced by a reasoning trace.
+
+        Args:
+            trace_id: ID of the reasoning trace
+
+        Returns:
+            List of dicts with keys: labels, id, name, summary, linked_at, step_number
+        """
+        results = await self._client.execute_read(
+            queries.GET_TRACE_OUTCOMES,
+            {"trace_id": str(trace_id)},
+        )
+        outcomes: list[dict[str, Any]] = []
+        for row in results:
+            outcomes.append(
+                {
+                    "labels": row.get("labels", []),
+                    "id": row.get("id"),
+                    "name": row.get("name"),
+                    "summary": row.get("summary"),
+                    "linked_at": _to_python_datetime(row.get("linked_at"))
+                    if row.get("linked_at")
+                    else None,
+                    "step_number": row.get("step_number"),
+                }
+            )
+        return outcomes
+
+    async def get_memory_reasoning(
+        self,
+        target_id: UUID | str,
+    ) -> list[dict[str, Any]]:
+        """Get reasoning traces that produced a specific durable memory.
+
+        Answers "why do we know this?" by finding traces linked via PRODUCED.
+
+        Args:
+            target_id: ID of the durable memory (Fact, Preference, or Entity)
+
+        Returns:
+            List of dicts with keys: trace_id, task, outcome, success, started_at, linked_at, step_number
+        """
+        results = await self._client.execute_read(
+            queries.GET_MEMORY_REASONING,
+            {"target_id": str(target_id)},
+        )
+        traces: list[dict[str, Any]] = []
+        for row in results:
+            traces.append(
+                {
+                    "trace_id": row.get("trace_id"),
+                    "task": row.get("task"),
+                    "outcome": row.get("outcome"),
+                    "success": row.get("success"),
+                    "started_at": _to_python_datetime(row.get("started_at"))
+                    if row.get("started_at")
+                    else None,
+                    "linked_at": _to_python_datetime(row.get("linked_at"))
+                    if row.get("linked_at")
+                    else None,
+                    "step_number": row.get("step_number"),
+                }
+            )
         return traces
 
 

@@ -13,6 +13,7 @@ from neo4j_agent_memory.config.settings import (
     Neo4jConfig,
     ResolutionConfig,
     ResolverStrategy,
+    SearchConfig,
 )
 
 
@@ -241,3 +242,79 @@ class TestMemorySettings:
         assert settings.geocoding.enabled is True
         assert settings.geocoding.provider == GeocodingProvider.GOOGLE
         assert settings.geocoding.api_key.get_secret_value() == "google-api-key"
+
+
+class TestEmbeddingRecommendedThreshold:
+    """Tests for EmbeddingConfig.recommended_threshold()."""
+
+    def test_bge_small_per_category(self):
+        cfg = EmbeddingConfig(provider=EmbeddingProvider.SENTENCE_TRANSFORMERS)
+        # Calibrated values from .spark_utils/data/20260514_threshold_calibration.md
+        assert cfg.recommended_threshold("preference") == 0.80
+        assert cfg.recommended_threshold("fact") == 0.85
+        assert cfg.recommended_threshold("entity") == 0.83
+        assert cfg.recommended_threshold("message") == 0.82
+        assert cfg.recommended_threshold("trace") == 0.83
+        assert cfg.recommended_threshold("default") == 0.82
+        assert cfg.recommended_threshold("unknown") == 0.82  # falls back to default
+
+    def test_openai_uses_provider_default(self):
+        cfg = EmbeddingConfig(provider=EmbeddingProvider.OPENAI, model="text-embedding-3-small")
+        # Provider-level default; categories not differentiated until calibrated.
+        assert cfg.recommended_threshold() == 0.82
+        assert cfg.recommended_threshold("preference") == 0.82
+        assert cfg.recommended_threshold("fact") == 0.82
+
+    def test_openai_and_bge_recommendations_differ(self):
+        openai_cfg = EmbeddingConfig(
+            provider=EmbeddingProvider.OPENAI, model="text-embedding-3-small"
+        )
+        bge_cfg = EmbeddingConfig(provider=EmbeddingProvider.SENTENCE_TRANSFORMERS)
+        # Per-category differentiation is the whole point: BGE 'fact' > OpenAI default.
+        assert bge_cfg.recommended_threshold("fact") != openai_cfg.recommended_threshold("fact")
+        assert bge_cfg.recommended_threshold("fact") == 0.85
+        assert openai_cfg.recommended_threshold("fact") == 0.82
+
+    def test_custom_provider_low_default(self):
+        cfg = EmbeddingConfig(provider=EmbeddingProvider.CUSTOM, model="local-hashed-overlap")
+        # LocalHashedEmbedder is overlap-based, far less discriminative.
+        assert cfg.recommended_threshold() == 0.55
+
+
+class TestSearchConfigResolveThreshold:
+    """Tests for SearchConfig.resolve_threshold()."""
+
+    def _bge(self) -> EmbeddingConfig:
+        return EmbeddingConfig(provider=EmbeddingProvider.SENTENCE_TRANSFORMERS)
+
+    def test_falls_back_to_embedder_recommendation(self):
+        search = SearchConfig()
+        emb = self._bge()
+        assert search.resolve_threshold("fact", emb) == 0.85
+        assert search.resolve_threshold("preference", emb) == 0.80
+
+    def test_default_threshold_overrides_embedder(self):
+        search = SearchConfig(default_threshold=0.9)
+        emb = self._bge()
+        # default_threshold beats embedder recommendation when no per-category override.
+        assert search.resolve_threshold("fact", emb) == 0.9
+        assert search.resolve_threshold("preference", emb) == 0.9
+
+    def test_per_category_override_wins(self):
+        search = SearchConfig(default_threshold=0.9, fact_threshold=0.7)
+        emb = self._bge()
+        # Per-category override beats default_threshold.
+        assert search.resolve_threshold("fact", emb) == 0.7
+        assert search.resolve_threshold("preference", emb) == 0.9
+
+    def test_unknown_category_uses_default_path(self):
+        search = SearchConfig(default_threshold=0.88)
+        emb = self._bge()
+        # Unknown category does not match a per-category field, falls through.
+        assert search.resolve_threshold("galaxy", emb) == 0.88
+
+    def test_zero_is_a_valid_explicit_override(self):
+        # 0.0 is falsy but legitimate ("no filtering"); it must still beat fallback.
+        search = SearchConfig(fact_threshold=0.0)
+        emb = self._bge()
+        assert search.resolve_threshold("fact", emb) == 0.0

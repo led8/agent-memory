@@ -35,9 +35,9 @@ Neo4j Agent Memory also supports entity extraction, relationship extraction,
 deduplication, enrichment, framework integrations, and MCP-based usage for
 assistant hosts.
 
-## Coding-Agent V1
+## Coding-Agent V1 + V2
 
-The coding-agent workflow now has a clear operational contract:
+The coding-agent workflow has a clear operational contract:
 
 - one `session_id` per active coding task
 - selective short-term writes instead of noisy full logs
@@ -47,34 +47,80 @@ The coding-agent workflow now has a clear operational contract:
 - durable supersession that keeps metadata status and explicit
   `SUPERSEDED_BY` graph edges for facts and preferences
 
+**V2 (graph-native provenance)** extends this with:
+
+- explicit provenance edges from durable memories to their evidence (messages, traces, tool calls)
+- `PRODUCED` edges from reasoning traces to the durable outcomes they generated
+- optional persistence and shell-based review of long-term memory candidates
+- confidence-gated relations with `pending_review` status and a reviewed ingestion pipeline
+- provenance-annotated startup recall (`--include-provenance`)
+
 For the shell-first workflow, start with the local skill:
 
 - [Agent Memory skill](skill/agent-memory/SKILL.md)
 - [Coding agent workflow example](examples/coding_agent_workflow.py)
 - [Coding-agent usage model](.spark_utils/data/20260410_coding_agent_usage_model.md)
+- [V2 provenance design](docs/v2-graph-native-provenance.md)
 
-## What V2 Will Add
+## V2 Graph-Native Provenance (Implemented)
 
-V2 is intended to make the memory model more graph-native and less ambiguous,
-without giving up the current V1 safety guarantees.
+V2 makes the memory model more graph-native without giving up V1 safety:
 
-The main directions are:
+| Feature | Relationship | From → To |
+|---|---|---|
+| Fact evidence | `SUPPORTED_BY` | Fact → Message / ReasoningTrace / ToolCall |
+| Preference evidence | `DERIVED_FROM` | Preference → Message / ReasoningTrace |
+| Fact-entity linking | `ABOUT` | Fact → Entity |
+| Trace outcomes | `PRODUCED` | ReasoningTrace → Fact / Preference / Entity |
+| Step-entity linking | `ABOUT` | ReasoningStep → Entity |
+| Tool observation | `OBSERVED` | ToolCall → Fact |
+| Candidate origin | `PROPOSED_BY` | LongTermCandidate → ReasoningTrace / Message |
+| Relation provenance | properties on `RELATED_TO` | source_message_id, extractor_name, status |
 
-- explicit provenance edges from durable memories to messages, traces, or tool calls
-- stronger links from reasoning traces to the durable outcomes they produced
-- richer entity semantics and more reliable reviewed relation ingestion
-- optional persistence of long-term candidates and review history
-- tighter write policy and retrieval quality before any broader automation
-
-What remains intentionally out of scope for now:
+What remains intentionally out of scope:
 
 - aggressive auto-promotion from short-term to long-term
 - broad LLM fallback everywhere
 - graph expansion without strong provenance
 
-Roadmap note:
+Design references:
 
+- [V2 provenance design](docs/v2-graph-native-provenance.md)
 - [V2 roadmap and assumptions](.spark_utils/ideas_and_assumptions/20260414_agent_memory_v2_roadmap.md)
+
+## Semantic Neighborhood Linking
+
+The **GraphLinker** automatically creates `RELATES_TO` edges between semantically
+similar nodes when any embedded node is created. This turns isolated vector-store
+nodes into a connected knowledge graph with meaningful clusters.
+
+| Aspect | Detail |
+|--------|--------|
+| Trigger | Automatic on write (`add_fact`, `add_preference`, `add_message`, `start_trace`) |
+| Method | Cosine similarity via Neo4j vector indexes |
+| Defaults | max_neighbors=5, min_similarity=0.75 |
+| Scope | Cross-layer (Facts ↔ Preferences ↔ Messages ↔ Traces) |
+| Edge metadata | `similarity` score, `link_method`, `linked_at` |
+
+Configuration via `MemorySettings`:
+
+```python
+settings = MemorySettings(
+    neo4j={...},
+    linker={"enabled": True, "max_neighbors": 5, "min_similarity": 0.75},
+)
+```
+
+Backfill orphan nodes via CLI:
+
+```bash
+neo4j-agent-memory memory link-neighbors --backfill
+neo4j-agent-memory memory link-neighbors --backfill --label Fact --min-similarity 0.7
+```
+
+Design details:
+
+- [Graph Linker implementation](docs/graph-linker.md)
 
 ## Choose A Surface
 
@@ -114,7 +160,7 @@ older deterministic hash-based fallback.
 For coding work, the core commands are:
 
 - `session-id`
-- `recall`
+- `recall` (with `--include-provenance`)
 - `add-message`
 - `start-trace`
 - `add-trace-step`
@@ -131,6 +177,13 @@ For coding work, the core commands are:
 - `inspect`
 - `search`
 - `get-context`
+- `get-provenance`
+- `list-candidates`
+- `accept-candidate`
+- `ignore-candidate`
+- `link-neighbors`
+- `list-pending-relations`
+- `review-relation`
 
 Reference:
 

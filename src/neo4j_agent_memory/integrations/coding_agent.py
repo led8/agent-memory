@@ -87,6 +87,7 @@ class LongTermMemoryCandidate:
     evidence: str
     suggested_action: str
     payload: dict[str, Any]
+    stored_candidate_id: str | None = None  # V2: set when persisted as graph node
 
     @property
     def recommended(self) -> bool:
@@ -242,6 +243,32 @@ class CodingAgentMemory:
         if not lines:
             return ""
         return "\n".join([f"## {title}", *lines])
+
+    async def _get_provenance_annotation(self, kind: str, entry_id: str) -> str | None:
+        """Get a compact provenance annotation for recall output."""
+        try:
+            if kind == "fact":
+                prov = await self._client.long_term.get_fact_provenance(entry_id)
+            elif kind == "preference":
+                prov = await self._client.long_term.get_preference_provenance(entry_id)
+            else:
+                return None
+
+            if not prov:
+                return None
+
+            sources = []
+            for item in prov.get("traces", []):
+                task = item.get("task", "")
+                if task:
+                    sources.append(f"trace:{self._truncate_text(task, limit=30)}")
+            for item in prov.get("messages", []):
+                role = item.get("role", "")
+                if role:
+                    sources.append(f"msg:{role}")
+            return ", ".join(sources[:2]) if sources else None
+        except Exception:
+            return None
 
     def _format_reasoning_trace_lines(self, trace: "ReasoningTrace") -> list[str]:
         """Format one reasoning trace summary for startup recall fallback."""
@@ -431,6 +458,76 @@ class CodingAgentMemory:
                 reason=reason,
             )
 
+    async def _link_fact_provenance(
+        self,
+        fact_id: UUID,
+        *,
+        evidence_ids: list[str | "UUID"] | None = None,
+    ) -> None:
+        """Create SUPPORTED_BY provenance edges for a fact.
+
+        Links the fact to:
+        1. Any explicit evidence_ids (assumes message type)
+        2. The active reasoning trace (if any)
+        3. The last user message (if any, and no explicit evidence)
+
+        Also creates a PRODUCED edge from the active trace if one exists.
+        """
+        if evidence_ids:
+            for eid in evidence_ids:
+                await self._client.long_term.link_fact_to_evidence(
+                    fact_id, eid, evidence_type="message"
+                )
+        elif self._active_trace_id is not None:
+            await self._client.long_term.link_fact_to_evidence(
+                fact_id, self._active_trace_id, evidence_type="reasoning_trace"
+            )
+        elif self._last_user_message_id is not None:
+            await self._client.long_term.link_fact_to_evidence(
+                fact_id, self._last_user_message_id, evidence_type="message"
+            )
+
+        # V2: PRODUCED edge from active trace to the fact
+        if self._active_trace_id is not None:
+            await self._client.reasoning.link_trace_to_outcome(
+                self._active_trace_id, fact_id, target_type="fact"
+            )
+
+    async def _link_preference_provenance(
+        self,
+        preference_id: UUID,
+        *,
+        evidence_ids: list[str | "UUID"] | None = None,
+    ) -> None:
+        """Create DERIVED_FROM provenance edges for a preference.
+
+        Links the preference to:
+        1. Any explicit evidence_ids (assumes message type)
+        2. The active reasoning trace (if any)
+        3. The last user message (if any, and no explicit evidence)
+
+        Also creates a PRODUCED edge from the active trace if one exists.
+        """
+        if evidence_ids:
+            for eid in evidence_ids:
+                await self._client.long_term.link_preference_to_evidence(
+                    preference_id, eid, evidence_type="message"
+                )
+        elif self._active_trace_id is not None:
+            await self._client.long_term.link_preference_to_evidence(
+                preference_id, self._active_trace_id, evidence_type="reasoning_trace"
+            )
+        elif self._last_user_message_id is not None:
+            await self._client.long_term.link_preference_to_evidence(
+                preference_id, self._last_user_message_id, evidence_type="message"
+            )
+
+        # V2: PRODUCED edge from active trace to the preference
+        if self._active_trace_id is not None:
+            await self._client.reasoning.link_trace_to_outcome(
+                self._active_trace_id, preference_id, target_type="preference"
+            )
+
     def _candidate_metadata(
         self,
         *,
@@ -617,7 +714,7 @@ class CodingAgentMemory:
         if existing is not None:
             return existing, None
 
-        return await self._client.long_term.add_entity(
+        entity, dedup_result = await self._client.long_term.add_entity(
             name=name,
             entity_type=entity_type,
             description=description,
@@ -627,6 +724,14 @@ class CodingAgentMemory:
             enrich=enrich,
             geocode=geocode,
         )
+
+        # V2: PRODUCED edge from active trace to the entity
+        if self._active_trace_id is not None:
+            await self._client.reasoning.link_trace_to_outcome(
+                self._active_trace_id, entity.id, target_type="entity"
+            )
+
+        return entity, dedup_result
 
     async def remember_preference(
         self,
@@ -639,8 +744,15 @@ class CodingAgentMemory:
         generate_embedding: bool = True,
         deduplicate: bool = True,
         supersede_conflicts: bool = True,
+        evidence_ids: list[str | "UUID"] | None = None,
     ) -> "Preference":
-        """Store a durable user or workflow preference."""
+        """Store a durable user or workflow preference.
+
+        Automatically creates DERIVED_FROM provenance edges when:
+        - An active reasoning trace exists (links to trace)
+        - A last user message exists (links to message)
+        - Explicit evidence_ids are provided
+        """
         merged_metadata = self._build_active_metadata(self._merge_metadata(metadata))
         if deduplicate:
             existing = await self._find_existing_preference(
@@ -680,6 +792,10 @@ class CodingAgentMemory:
                     "and durable scope."
                 ),
             )
+
+        # V2: Create DERIVED_FROM provenance edges
+        await self._link_preference_provenance(created.id, evidence_ids=evidence_ids)
+
         return created
 
     async def remember_fact(
@@ -693,8 +809,18 @@ class CodingAgentMemory:
         generate_embedding: bool = True,
         deduplicate: bool = True,
         supersede_conflicts: bool = True,
+        evidence_ids: list[str | "UUID"] | None = None,
+        auto_link_entities: bool = True,
     ) -> "Fact":
-        """Store a durable long-term fact for the coding workflow."""
+        """Store a durable long-term fact for the coding workflow.
+
+        Automatically creates SUPPORTED_BY provenance edges when:
+        - An active reasoning trace exists (links to trace)
+        - A last user message exists (links to message)
+        - Explicit evidence_ids are provided
+
+        Also auto-links facts to entities via ABOUT when auto_link_entities=True.
+        """
         merged_metadata = self._build_active_metadata(self._merge_metadata(metadata))
         if deduplicate:
             existing = await self._find_existing_fact(
@@ -734,9 +860,17 @@ class CodingAgentMemory:
                     "and durable scope."
                 ),
             )
+
+        # V2: Create SUPPORTED_BY provenance edges
+        await self._link_fact_provenance(created.id, evidence_ids=evidence_ids)
+
+        # V2: Auto-link fact to matching entities via ABOUT
+        if auto_link_entities:
+            await self._client.long_term.auto_link_fact_to_entities(created.id)
+
         return created
 
-    def propose_fact_candidate(
+    async def propose_fact_candidate(
         self,
         *,
         subject: str,
@@ -752,8 +886,14 @@ class CodingAgentMemory:
         memory_confidence: float = 1.0,
         metadata: dict[str, Any] | None = None,
         generate_embedding: bool = True,
+        persist_candidate: bool = False,
     ) -> LongTermMemoryCandidate | None:
-        """Propose a durable fact candidate without writing it."""
+        """Propose a durable fact candidate without writing it.
+
+        Args:
+            persist_candidate: If True, stores the candidate as a graph node
+                for later review. Default False preserves in-memory-only behavior.
+        """
         content = f"{subject} {predicate} {obj}"
         resolved_confidence = self._resolve_candidate_confidence(
             source=source,
@@ -768,7 +908,7 @@ class CodingAgentMemory:
             confidence=resolved_confidence,
             metadata=metadata,
         )
-        return self._build_candidate(
+        candidate = self._build_candidate(
             candidate_type=LongTermCandidateType.FACT,
             scope_kind=scope_kind,
             content=content,
@@ -787,8 +927,11 @@ class CodingAgentMemory:
                 "generate_embedding": generate_embedding,
             },
         )
+        if candidate is not None and persist_candidate:
+            await self._persist_candidate(candidate)
+        return candidate
 
-    def propose_preference_candidate(
+    async def propose_preference_candidate(
         self,
         *,
         category: str,
@@ -804,8 +947,14 @@ class CodingAgentMemory:
         memory_confidence: float = 1.0,
         metadata: dict[str, Any] | None = None,
         generate_embedding: bool = True,
+        persist_candidate: bool = False,
     ) -> LongTermMemoryCandidate | None:
-        """Propose a durable preference candidate without writing it."""
+        """Propose a durable preference candidate without writing it.
+
+        Args:
+            persist_candidate: If True, stores the candidate as a graph node
+                for later review. Default False preserves in-memory-only behavior.
+        """
         resolved_confidence = self._resolve_candidate_confidence(
             source=source,
             durable=durable,
@@ -819,7 +968,7 @@ class CodingAgentMemory:
             confidence=resolved_confidence,
             metadata=metadata,
         )
-        return self._build_candidate(
+        candidate = self._build_candidate(
             candidate_type=LongTermCandidateType.PREFERENCE,
             scope_kind=scope_kind,
             content=preference,
@@ -838,8 +987,11 @@ class CodingAgentMemory:
                 "generate_embedding": generate_embedding,
             },
         )
+        if candidate is not None and persist_candidate:
+            await self._persist_candidate(candidate)
+        return candidate
 
-    def propose_entity_candidate(
+    async def propose_entity_candidate(
         self,
         *,
         name: str,
@@ -857,8 +1009,14 @@ class CodingAgentMemory:
         deduplicate: bool = True,
         enrich: bool = False,
         geocode: bool = False,
+        persist_candidate: bool = False,
     ) -> LongTermMemoryCandidate | None:
-        """Propose a durable entity candidate without writing it."""
+        """Propose a durable entity candidate without writing it.
+
+        Args:
+            persist_candidate: If True, stores the candidate as a graph node
+                for later review. Default False preserves in-memory-only behavior.
+        """
         resolved_confidence = self._resolve_candidate_confidence(
             source=source,
             durable=durable,
@@ -872,7 +1030,7 @@ class CodingAgentMemory:
             confidence=resolved_confidence,
             metadata=metadata,
         )
-        return self._build_candidate(
+        candidate = self._build_candidate(
             candidate_type=LongTermCandidateType.ENTITY,
             scope_kind=scope_kind,
             content=name,
@@ -893,6 +1051,28 @@ class CodingAgentMemory:
                 "geocode": geocode,
             },
         )
+        if candidate is not None and persist_candidate:
+            await self._persist_candidate(candidate)
+        return candidate
+
+    async def _persist_candidate(self, candidate: LongTermMemoryCandidate) -> None:
+        """Store the candidate as a LongTermCandidate graph node."""
+        result = await self._client.long_term.store_candidate(
+            candidate_type=candidate.type.value,
+            scope_kind=candidate.scope_kind.value,
+            content=candidate.content,
+            why_candidate=candidate.why_candidate,
+            source=candidate.source.value,
+            confidence=candidate.confidence.value,
+            evidence=candidate.evidence,
+            suggested_action=candidate.suggested_action,
+            payload=candidate.payload,
+            proposed_by_trace_id=self._active_trace_id,
+            proposed_by_message_id=(
+                self._last_user_message_id if self._active_trace_id is None else None
+            ),
+        )
+        candidate.stored_candidate_id = result.get("id")
 
     async def remember_candidate(
         self,
@@ -900,7 +1080,11 @@ class CodingAgentMemory:
         *,
         allow_medium_confidence: bool = False,
     ) -> "Entity | Preference | Fact":
-        """Persist a reviewed long-term candidate explicitly."""
+        """Persist a reviewed long-term candidate explicitly.
+
+        If the candidate was stored as a graph node (persist_candidate=True),
+        its status is updated to 'accepted'.
+        """
         if (
             candidate.confidence == LongTermCandidateConfidence.MEDIUM
             and not allow_medium_confidence
@@ -911,13 +1095,22 @@ class CodingAgentMemory:
             )
 
         if candidate.type == LongTermCandidateType.FACT:
-            return await self.remember_fact(**candidate.payload)
-        if candidate.type == LongTermCandidateType.PREFERENCE:
-            return await self.remember_preference(**candidate.payload)
-        if candidate.type == LongTermCandidateType.ENTITY:
+            result = await self.remember_fact(**candidate.payload)
+        elif candidate.type == LongTermCandidateType.PREFERENCE:
+            result = await self.remember_preference(**candidate.payload)
+        elif candidate.type == LongTermCandidateType.ENTITY:
             entity, _ = await self.remember_entity(**candidate.payload)
-            return entity
-        raise ValueError(f"Unsupported candidate type: {candidate.type}")
+            result = entity
+        else:
+            raise ValueError(f"Unsupported candidate type: {candidate.type}")
+
+        # V2: update stored candidate status to 'accepted'
+        if candidate.stored_candidate_id is not None:
+            await self._client.long_term.accept_candidate(
+                candidate.stored_candidate_id
+            )
+
+        return result
 
     async def start_trace(
         self,
@@ -1047,8 +1240,13 @@ class CodingAgentMemory:
         max_facts: int = 5,
         max_entities: int = 5,
         max_traces: int = 3,
+        include_provenance: bool = False,
     ) -> str:
-        """Get a coding-oriented startup recall for the current task."""
+        """Get a coding-oriented startup recall for the current task.
+
+        Args:
+            include_provenance: If True, annotate facts/preferences with their evidence source.
+        """
         recall_query = validate_query(query) if query is not None else self._task
 
         sections = [
@@ -1097,6 +1295,10 @@ class CodingAgentMemory:
             line = f"- [{preference.category}] {self._truncate_text(preference.preference, limit=140)}"
             if preference.context:
                 line += f" (context: {self._truncate_text(preference.context, limit=80)})"
+            if include_provenance:
+                prov = await self._get_provenance_annotation("preference", str(preference.id))
+                if prov:
+                    line += f" [{prov}]"
             preference_lines.append(line)
         sections.append(self._format_section("Durable Preferences", preference_lines))
 
@@ -1115,11 +1317,18 @@ class CodingAgentMemory:
                     limit=max_facts,
                 )
             )
-        fact_lines = [
-            f"- {self._truncate_text(fact.subject, limit=60)} {self._truncate_text(fact.predicate, limit=60)} "
-            f"{self._truncate_text(fact.object, limit=140)}"
-            for fact in facts
-        ]
+        fact_lines = []
+        for fact in facts:
+            line = (
+                f"- {self._truncate_text(fact.subject, limit=60)} "
+                f"{self._truncate_text(fact.predicate, limit=60)} "
+                f"{self._truncate_text(fact.object, limit=140)}"
+            )
+            if include_provenance:
+                prov = await self._get_provenance_annotation("fact", str(fact.id))
+                if prov:
+                    line += f" [{prov}]"
+            fact_lines.append(line)
         sections.append(self._format_section("Durable Facts", fact_lines))
 
         entities = self._filter_repo_recall_entries(

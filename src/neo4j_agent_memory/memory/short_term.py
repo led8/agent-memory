@@ -276,9 +276,16 @@ class ShortTermMemory(BaseMemory[Message]):
         client: "Neo4jClient",
         embedder: "Embedder | None" = None,
         extractor: "EntityExtractor | None" = None,
+        search_config: "Any | None" = None,
+        embedding_config: "Any | None" = None,
     ):
         """Initialize short-term memory."""
-        super().__init__(client, embedder, extractor)
+        super().__init__(client, embedder, extractor, search_config, embedding_config)
+        self._linker: Any | None = None  # Injected by MemoryClient after init
+
+    def set_linker(self, linker: Any) -> None:
+        """Inject the GraphLinker (called by MemoryClient after connect)."""
+        self._linker = linker
 
     async def add(self, content: str, **kwargs: Any) -> Message:
         """Add content as a message."""
@@ -551,6 +558,14 @@ class ShortTermMemory(BaseMemory[Message]):
         if extract_entities and self._extractor is not None:
             await self._extract_and_link_entities(message, extract_relations=extract_relations)
 
+        # Semantic neighborhood linking (cross-layer: message -> facts/preferences)
+        if message.embedding and self._linker is not None:
+            await self._linker.link_to_neighborhood(
+                node_id=str(message.id),
+                node_label="Message",
+                embedding=message.embedding,
+            )
+
         return message
 
     async def get_conversation(
@@ -630,7 +645,7 @@ class ShortTermMemory(BaseMemory[Message]):
         *,
         session_id: str | None = None,
         limit: int = 10,
-        threshold: float = 0.7,
+        threshold: float | None = None,
         metadata_filters: dict[str, Any] | None = None,
     ) -> list[Message]:
         """
@@ -640,7 +655,10 @@ class ShortTermMemory(BaseMemory[Message]):
             query: Search query
             session_id: Optional filter by session
             limit: Maximum results
-            threshold: Minimum similarity threshold
+            threshold: Minimum similarity threshold. ``None`` resolves via
+                settings (per-category override → default → embedder
+                recommendation). ``0.0`` is a valid explicit "no filtering"
+                override.
             metadata_filters: Optional metadata-based filters. Supports:
                 - Simple equality: {"speaker": "Brian Chesky"}
                 - Comparison operators: {"turn_index": {"$gt": 5}}
@@ -653,6 +671,8 @@ class ShortTermMemory(BaseMemory[Message]):
         """
         if self._embedder is None:
             return []
+
+        threshold = self._resolve_threshold("message", threshold)
 
         query_embedding = await self._embedder.embed(query)
 
@@ -713,12 +733,15 @@ class ShortTermMemory(BaseMemory[Message]):
             session_id: Optional session filter
             max_messages: Maximum messages to include
             include_related: Whether to include related entities
+            relevance_threshold: Optional explicit threshold override forwarded
+                to ``search_messages``. ``None`` resolves via settings.
 
         Returns:
             Formatted context string
         """
         session_id = kwargs.get("session_id")
         max_messages = kwargs.get("max_messages", 10)
+        relevance_threshold = kwargs.get("relevance_threshold")
 
         parts = []
 
@@ -732,7 +755,9 @@ class ShortTermMemory(BaseMemory[Message]):
 
         # Search for relevant messages
         if self._embedder is not None:
-            relevant = await self.search_messages(query, limit=5)
+            relevant = await self.search_messages(
+                query, limit=5, threshold=relevance_threshold
+            )
             if relevant:
                 parts.append("\n### Relevant Past Messages")
                 for msg in relevant:
@@ -956,7 +981,14 @@ class ShortTermMemory(BaseMemory[Message]):
                 # Store extracted relations
                 if extract_relations and extraction_result.relations:
                     stored = await self._store_relations(
-                        extraction_result.relations, entity_name_to_id
+                        extraction_result.relations,
+                        entity_name_to_id,
+                        source_message_id=message_id,
+                        extractor_name=(
+                            self._extractor.__class__.__name__
+                            if self._extractor
+                            else None
+                        ),
                     )
                     relations_extracted += stored
 
@@ -1093,12 +1125,23 @@ class ShortTermMemory(BaseMemory[Message]):
 
         # Store extracted relations
         if extract_relations and result.relations:
-            await self._store_relations(result.relations, entity_name_to_id)
+            await self._store_relations(
+                result.relations,
+                entity_name_to_id,
+                source_message_id=str(message.id),
+                extractor_name=(
+                    self._extractor.__class__.__name__ if self._extractor else None
+                ),
+            )
 
     async def _store_relations(
         self,
         relations: list,
         entity_name_to_id: dict[str, str],
+        *,
+        source_message_id: str | None = None,
+        extractor_name: str | None = None,
+        min_confidence: float = 0.0,
     ) -> int:
         """Store extracted relations as RELATED_TO relationships between entities.
 
@@ -1109,6 +1152,9 @@ class ShortTermMemory(BaseMemory[Message]):
         Args:
             relations: List of ExtractedRelation objects from the extractor
             entity_name_to_id: Mapping of lowercase entity names to their IDs
+            source_message_id: ID of the message that triggered extraction
+            extractor_name: Name of the extractor that produced the relations
+            min_confidence: Threshold below which relations get 'pending_review' status
 
         Returns:
             Number of relations successfully stored
@@ -1134,6 +1180,9 @@ class ShortTermMemory(BaseMemory[Message]):
                         "target_id": target_id,
                         "relation_type": relation.relation_type,
                         "confidence": relation.confidence,
+                        "min_confidence": min_confidence,
+                        "source_message_id": source_message_id,
+                        "extractor_name": extractor_name,
                     },
                 )
                 stored_count += 1
@@ -1146,6 +1195,9 @@ class ShortTermMemory(BaseMemory[Message]):
                         "target_name": relation.target,
                         "relation_type": relation.relation_type,
                         "confidence": relation.confidence,
+                        "min_confidence": min_confidence,
+                        "source_message_id": source_message_id,
+                        "extractor_name": extractor_name,
                     },
                 )
                 if result:

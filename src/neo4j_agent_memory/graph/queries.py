@@ -407,8 +407,12 @@ ON CREATE SET
     r.id = $id,
     r.description = $description,
     r.confidence = $confidence,
+    r.status = CASE WHEN $confidence >= $min_confidence THEN 'active' ELSE 'pending_review' END,
     r.valid_from = $valid_from,
     r.valid_until = $valid_until,
+    r.source_message_id = $source_message_id,
+    r.extractor_name = $extractor_name,
+    r.extracted_at = CASE WHEN $extractor_name IS NOT NULL THEN datetime() ELSE null END,
     r.created_at = datetime()
 RETURN r
 """
@@ -484,6 +488,10 @@ MERGE (source)-[r:RELATED_TO]->(target)
 ON CREATE SET
     r.relation_type = $relation_type,
     r.confidence = $confidence,
+    r.status = CASE WHEN $confidence >= $min_confidence THEN 'active' ELSE 'pending_review' END,
+    r.source_message_id = $source_message_id,
+    r.extractor_name = $extractor_name,
+    r.extracted_at = datetime(),
     r.created_at = datetime()
 ON MATCH SET
     r.confidence = CASE WHEN $confidence > r.confidence THEN $confidence ELSE r.confidence END,
@@ -499,6 +507,10 @@ MERGE (source)-[r:RELATED_TO]->(target)
 ON CREATE SET
     r.relation_type = $relation_type,
     r.confidence = $confidence,
+    r.status = CASE WHEN $confidence >= $min_confidence THEN 'active' ELSE 'pending_review' END,
+    r.source_message_id = $source_message_id,
+    r.extractor_name = $extractor_name,
+    r.extracted_at = datetime(),
     r.created_at = datetime()
 ON MATCH SET
     r.confidence = CASE WHEN $confidence > r.confidence THEN $confidence ELSE r.confidence END,
@@ -1456,3 +1468,362 @@ def build_metadata_search_query(metadata_clause: str) -> str:
         Complete Cypher query string for vector search with metadata filter
     """
     return SEARCH_MESSAGES_WITH_METADATA_TEMPLATE.format(metadata_clause=metadata_clause)
+
+
+# =============================================================================
+# V2 DURABLE PROVENANCE QUERIES
+# =============================================================================
+
+# --- SUPPORTED_BY: Fact -> Message | ReasoningTrace | ToolCall ---
+
+LINK_FACT_SUPPORTED_BY_MESSAGE = """
+MATCH (f:Fact {id: $fact_id})
+MATCH (m:Message {id: $evidence_id})
+MERGE (f)-[r:SUPPORTED_BY]->(m)
+ON CREATE SET
+    r.confidence = $confidence,
+    r.link_type = 'message',
+    r.linked_at = datetime()
+ON MATCH SET
+    r.confidence = CASE WHEN $confidence > r.confidence THEN $confidence ELSE r.confidence END,
+    r.updated_at = datetime()
+RETURN r
+"""
+
+LINK_FACT_SUPPORTED_BY_TRACE = """
+MATCH (f:Fact {id: $fact_id})
+MATCH (rt:ReasoningTrace {id: $evidence_id})
+MERGE (f)-[r:SUPPORTED_BY]->(rt)
+ON CREATE SET
+    r.confidence = $confidence,
+    r.link_type = 'reasoning_trace',
+    r.linked_at = datetime()
+ON MATCH SET
+    r.confidence = CASE WHEN $confidence > r.confidence THEN $confidence ELSE r.confidence END,
+    r.updated_at = datetime()
+RETURN r
+"""
+
+LINK_FACT_SUPPORTED_BY_TOOL_CALL = """
+MATCH (f:Fact {id: $fact_id})
+MATCH (tc:ToolCall {id: $evidence_id})
+MERGE (f)-[r:SUPPORTED_BY]->(tc)
+ON CREATE SET
+    r.confidence = $confidence,
+    r.link_type = 'tool_call',
+    r.linked_at = datetime()
+ON MATCH SET
+    r.confidence = CASE WHEN $confidence > r.confidence THEN $confidence ELSE r.confidence END,
+    r.updated_at = datetime()
+RETURN r
+"""
+
+GET_FACT_PROVENANCE = """
+MATCH (f:Fact {id: $fact_id})
+OPTIONAL MATCH (f)-[r1:SUPPORTED_BY]->(m:Message)
+OPTIONAL MATCH (f)-[r2:SUPPORTED_BY]->(rt:ReasoningTrace)
+OPTIONAL MATCH (f)-[r3:SUPPORTED_BY]->(tc:ToolCall)
+OPTIONAL MATCH (f)-[r4:ABOUT]->(e:Entity)
+RETURN f,
+       collect(DISTINCT CASE WHEN m IS NOT NULL THEN {id: m.id, content: m.content, role: m.role, confidence: r1.confidence, linked_at: r1.linked_at} END) AS messages,
+       collect(DISTINCT CASE WHEN rt IS NOT NULL THEN {id: rt.id, task: rt.task, outcome: rt.outcome, confidence: r2.confidence, linked_at: r2.linked_at} END) AS traces,
+       collect(DISTINCT CASE WHEN tc IS NOT NULL THEN {id: tc.id, tool_name: tc.tool_name, confidence: r3.confidence, linked_at: r3.linked_at} END) AS tool_calls,
+       collect(DISTINCT CASE WHEN e IS NOT NULL THEN {id: e.id, name: e.name, type: e.type} END) AS entities
+"""
+
+# --- DERIVED_FROM: Preference -> Message | ReasoningTrace ---
+
+LINK_PREFERENCE_DERIVED_FROM_MESSAGE = """
+MATCH (p:Preference {id: $preference_id})
+MATCH (m:Message {id: $evidence_id})
+MERGE (p)-[r:DERIVED_FROM]->(m)
+ON CREATE SET
+    r.confidence = $confidence,
+    r.link_type = 'message',
+    r.linked_at = datetime()
+ON MATCH SET
+    r.confidence = CASE WHEN $confidence > r.confidence THEN $confidence ELSE r.confidence END,
+    r.updated_at = datetime()
+RETURN r
+"""
+
+LINK_PREFERENCE_DERIVED_FROM_TRACE = """
+MATCH (p:Preference {id: $preference_id})
+MATCH (rt:ReasoningTrace {id: $evidence_id})
+MERGE (p)-[r:DERIVED_FROM]->(rt)
+ON CREATE SET
+    r.confidence = $confidence,
+    r.link_type = 'reasoning_trace',
+    r.linked_at = datetime()
+ON MATCH SET
+    r.confidence = CASE WHEN $confidence > r.confidence THEN $confidence ELSE r.confidence END,
+    r.updated_at = datetime()
+RETURN r
+"""
+
+GET_PREFERENCE_PROVENANCE = """
+MATCH (p:Preference {id: $preference_id})
+OPTIONAL MATCH (p)-[r1:DERIVED_FROM]->(m:Message)
+OPTIONAL MATCH (p)-[r2:DERIVED_FROM]->(rt:ReasoningTrace)
+OPTIONAL MATCH (p)-[r3:ABOUT]->(e:Entity)
+RETURN p,
+       collect(DISTINCT CASE WHEN m IS NOT NULL THEN {id: m.id, content: m.content, role: m.role, confidence: r1.confidence, linked_at: r1.linked_at} END) AS messages,
+       collect(DISTINCT CASE WHEN rt IS NOT NULL THEN {id: rt.id, task: rt.task, outcome: rt.outcome, confidence: r2.confidence, linked_at: r2.linked_at} END) AS traces,
+       collect(DISTINCT CASE WHEN e IS NOT NULL THEN {id: e.id, name: e.name, type: e.type} END) AS entities
+"""
+
+# --- ABOUT: Fact -> Entity ---
+
+LINK_FACT_ABOUT_ENTITY = """
+MATCH (f:Fact {id: $fact_id})
+MATCH (e:Entity {id: $entity_id})
+MERGE (f)-[r:ABOUT]->(e)
+ON CREATE SET
+    r.link_type = $link_type,
+    r.linked_at = datetime()
+RETURN r
+"""
+
+# Find facts linked to an entity via ABOUT
+GET_ENTITY_FACTS = """
+MATCH (e:Entity {id: $entity_id})<-[r:ABOUT]-(f:Fact)
+RETURN f, r.link_type AS link_type, r.linked_at AS linked_at
+ORDER BY f.created_at DESC
+LIMIT $limit
+"""
+
+# Auto-link: find entities matching a fact's subject or object
+FIND_ENTITIES_FOR_FACT_LINKING = """
+MATCH (f:Fact {id: $fact_id})
+WITH f, toLower(f.subject) AS subj, toLower(f.object) AS obj
+MATCH (e:Entity)
+WHERE e.merged_into IS NULL
+  AND (
+    toLower(e.name) = subj OR toLower(e.canonical_name) = subj
+    OR toLower(e.name) = obj OR toLower(e.canonical_name) = obj
+    OR any(alias IN coalesce(e.aliases, []) WHERE toLower(alias) = subj OR toLower(alias) = obj)
+  )
+RETURN e.id AS entity_id, e.name AS entity_name,
+       CASE
+           WHEN toLower(e.name) = subj OR toLower(e.canonical_name) = subj
+                OR any(alias IN coalesce(e.aliases, []) WHERE toLower(alias) = subj)
+           THEN 'subject'
+           ELSE 'object'
+       END AS match_role
+"""
+
+# --- PRODUCED: ReasoningTrace -> Fact | Preference | Entity ---
+
+LINK_TRACE_PRODUCED_FACT = """
+MATCH (rt:ReasoningTrace {id: $trace_id})
+MATCH (f:Fact {id: $target_id})
+MERGE (rt)-[r:PRODUCED]->(f)
+ON CREATE SET
+    r.linked_at = datetime(),
+    r.produced_during_step = $step_number
+RETURN r
+"""
+
+LINK_TRACE_PRODUCED_PREFERENCE = """
+MATCH (rt:ReasoningTrace {id: $trace_id})
+MATCH (p:Preference {id: $target_id})
+MERGE (rt)-[r:PRODUCED]->(p)
+ON CREATE SET
+    r.linked_at = datetime(),
+    r.produced_during_step = $step_number
+RETURN r
+"""
+
+LINK_TRACE_PRODUCED_ENTITY = """
+MATCH (rt:ReasoningTrace {id: $trace_id})
+MATCH (e:Entity {id: $target_id})
+MERGE (rt)-[r:PRODUCED]->(e)
+ON CREATE SET
+    r.linked_at = datetime(),
+    r.produced_during_step = $step_number
+RETURN r
+"""
+
+GET_TRACE_OUTCOMES = """
+MATCH (rt:ReasoningTrace {id: $trace_id})-[r:PRODUCED]->(target)
+RETURN labels(target) AS labels, target.id AS id, target.name AS name,
+       COALESCE(target.subject, target.category, target.name) AS summary,
+       r.linked_at AS linked_at, r.produced_during_step AS step_number
+ORDER BY r.linked_at
+"""
+
+GET_MEMORY_REASONING = """
+MATCH (rt:ReasoningTrace)-[r:PRODUCED]->(target {id: $target_id})
+RETURN rt.id AS trace_id, rt.task AS task, rt.outcome AS outcome,
+       rt.success AS success, rt.started_at AS started_at,
+       r.linked_at AS linked_at, r.produced_during_step AS step_number
+ORDER BY r.linked_at DESC
+"""
+
+# --- ABOUT: ReasoningStep -> Entity ---
+
+LINK_STEP_ABOUT_ENTITY = """
+MATCH (rs:ReasoningStep {id: $step_id})
+MATCH (e:Entity {id: $entity_id})
+MERGE (rs)-[r:ABOUT]->(e)
+ON CREATE SET
+    r.linked_at = datetime()
+RETURN r
+"""
+
+# --- OBSERVED: ToolCall -> Fact ---
+
+LINK_TOOL_CALL_OBSERVED_FACT = """
+MATCH (tc:ToolCall {id: $tool_call_id})
+MATCH (f:Fact {id: $fact_id})
+MERGE (tc)-[r:OBSERVED]->(f)
+ON CREATE SET
+    r.linked_at = datetime()
+RETURN r
+"""
+
+# =============================================================================
+# V2 CANDIDATE PERSISTENCE QUERIES
+# =============================================================================
+
+CREATE_CANDIDATE = """
+CREATE (c:LongTermCandidate {
+    id: $id,
+    type: $type,
+    scope_kind: $scope_kind,
+    content: $content,
+    why_candidate: $why_candidate,
+    source: $source,
+    confidence: $confidence,
+    evidence: $evidence,
+    suggested_action: $suggested_action,
+    payload: $payload,
+    status: 'proposed',
+    created_at: datetime(),
+    reviewed_at: null,
+    reviewed_by: null
+})
+RETURN c
+"""
+
+GET_CANDIDATE = """
+MATCH (c:LongTermCandidate {id: $id})
+RETURN c
+"""
+
+LIST_CANDIDATES = """
+MATCH (c:LongTermCandidate)
+WHERE ($status IS NULL OR c.status = $status)
+  AND ($type IS NULL OR c.type = $type)
+  AND ($scope_kind IS NULL OR c.scope_kind = $scope_kind)
+RETURN c
+ORDER BY c.created_at DESC
+LIMIT $limit
+"""
+
+UPDATE_CANDIDATE_STATUS = """
+MATCH (c:LongTermCandidate {id: $id})
+SET c.status = $status,
+    c.reviewed_at = datetime(),
+    c.reviewed_by = $reviewed_by
+RETURN c
+"""
+
+DELETE_CANDIDATE = """
+MATCH (c:LongTermCandidate {id: $id})
+DETACH DELETE c
+RETURN count(*) AS deleted
+"""
+
+# --- PROPOSED_BY: LongTermCandidate -> ReasoningTrace | Message ---
+
+LINK_CANDIDATE_PROPOSED_BY_TRACE = """
+MATCH (c:LongTermCandidate {id: $candidate_id})
+MATCH (rt:ReasoningTrace {id: $source_id})
+MERGE (c)-[r:PROPOSED_BY]->(rt)
+ON CREATE SET
+    r.linked_at = datetime()
+RETURN r
+"""
+
+LINK_CANDIDATE_PROPOSED_BY_MESSAGE = """
+MATCH (c:LongTermCandidate {id: $candidate_id})
+MATCH (m:Message {id: $source_id})
+MERGE (c)-[r:PROPOSED_BY]->(m)
+ON CREATE SET
+    r.linked_at = datetime()
+RETURN r
+"""
+
+GET_CANDIDATE_PROVENANCE = """
+MATCH (c:LongTermCandidate {id: $candidate_id})
+OPTIONAL MATCH (c)-[r1:PROPOSED_BY]->(rt:ReasoningTrace)
+OPTIONAL MATCH (c)-[r2:PROPOSED_BY]->(m:Message)
+RETURN c,
+       collect(DISTINCT CASE WHEN rt IS NOT NULL THEN {id: rt.id, task: rt.task, linked_at: r1.linked_at} END) AS traces,
+       collect(DISTINCT CASE WHEN m IS NOT NULL THEN {id: m.id, content: m.content, role: m.role, linked_at: r2.linked_at} END) AS messages
+"""
+
+# =============================================================================
+# V2 RELATION REVIEW & PROVENANCE QUERIES
+# =============================================================================
+
+# List relations pending review (low confidence, not yet reviewed)
+LIST_PENDING_RELATIONS = """
+MATCH (source:Entity)-[r:RELATED_TO]->(target:Entity)
+WHERE r.status = 'pending_review'
+RETURN source.id AS source_id, source.name AS source_name,
+       target.id AS target_id, target.name AS target_name,
+       r.relation_type AS relation_type, r.confidence AS confidence,
+       r.source_message_id AS source_message_id,
+       r.extractor_name AS extractor_name,
+       r.extracted_at AS extracted_at,
+       r.created_at AS created_at,
+       coalesce(r.type, r.relation_type) AS type
+ORDER BY r.confidence DESC, r.created_at DESC
+LIMIT $limit
+"""
+
+# Review (accept) a relation: set status to 'active'
+REVIEW_RELATION_ACCEPT = """
+MATCH (source:Entity {id: $source_id})-[r:RELATED_TO]->(target:Entity {id: $target_id})
+WHERE coalesce(r.type, r.relation_type) = $relation_type
+SET r.status = 'active',
+    r.reviewed_at = datetime(),
+    r.reviewed_by = $reviewed_by
+RETURN r, source.id AS source_id, target.id AS target_id
+"""
+
+# Review (reject) a relation: set status to 'rejected'
+REVIEW_RELATION_REJECT = """
+MATCH (source:Entity {id: $source_id})-[r:RELATED_TO]->(target:Entity {id: $target_id})
+WHERE coalesce(r.type, r.relation_type) = $relation_type
+SET r.status = 'rejected',
+    r.reviewed_at = datetime(),
+    r.reviewed_by = $reviewed_by
+RETURN r, source.id AS source_id, target.id AS target_id
+"""
+
+# Get provenance for a specific relation
+GET_RELATION_PROVENANCE = """
+MATCH (source:Entity {id: $source_id})-[r:RELATED_TO]->(target:Entity {id: $target_id})
+WHERE coalesce(r.type, r.relation_type) = $relation_type
+RETURN source.id AS source_id, source.name AS source_name,
+       target.id AS target_id, target.name AS target_name,
+       r.relation_type AS relation_type, r.confidence AS confidence,
+       r.status AS status,
+       r.source_message_id AS source_message_id,
+       r.extractor_name AS extractor_name,
+       r.extracted_at AS extracted_at,
+       r.reviewed_at AS reviewed_at,
+       r.reviewed_by AS reviewed_by,
+       r.created_at AS created_at
+"""
+
+# Get only active (reviewed or high-confidence) relations for an entity
+GET_ENTITY_ACTIVE_RELATIONSHIPS = """
+MATCH (e:Entity {id: $entity_id})-[r:RELATED_TO]-(other:Entity)
+WHERE coalesce(r.status, 'active') = 'active'
+RETURN e, r, other
+"""
+

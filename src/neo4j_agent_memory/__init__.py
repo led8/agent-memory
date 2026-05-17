@@ -105,6 +105,7 @@ class MemoryGraph(BaseModel):
 
 
 from neo4j_agent_memory.graph.client import Neo4jClient
+from neo4j_agent_memory.graph.linker import GraphLinker, LinkerConfig as _GraphLinkerConfig
 from neo4j_agent_memory.graph.schema import SchemaManager
 from neo4j_agent_memory.integration import MemoryIntegration, SessionStrategy
 from neo4j_agent_memory.integrations import (
@@ -330,6 +331,7 @@ class MemoryClient:
         self._short_term: ShortTermMemory | None = None
         self._long_term: LongTermMemory | None = None
         self._reasoning: ReasoningMemory | None = None
+        self._linker: GraphLinker | None = None
 
     async def __aenter__(self) -> "MemoryClient":
         """Async context manager entry."""
@@ -381,6 +383,8 @@ class MemoryClient:
             self._client,
             self._embedder,
             self._extractor,
+            search_config=self._settings.search,
+            embedding_config=self._settings.embedding,
         )
         self._long_term = LongTermMemory(
             self._client,
@@ -389,11 +393,33 @@ class MemoryClient:
             self._resolver,
             self._geocoder,
             self._enrichment_service,
+            search_config=self._settings.search,
+            embedding_config=self._settings.embedding,
         )
         self._reasoning = ReasoningMemory(
             self._client,
             self._embedder,
+            search_config=self._settings.search,
+            embedding_config=self._settings.embedding,
         )
+
+        # Initialize graph linker
+        linker_cfg = self._settings.linker
+        self._linker = GraphLinker(
+            self._client,
+            _GraphLinkerConfig(
+                enabled=linker_cfg.enabled,
+                max_neighbors=linker_cfg.max_neighbors,
+                min_similarity=linker_cfg.min_similarity,
+                cross_label=linker_cfg.cross_label,
+                exclude_labels=linker_cfg.exclude_labels,
+            ),
+        )
+
+        # Inject linker into memory layers
+        self._long_term.set_linker(self._linker)
+        self._short_term.set_linker(self._linker)
+        self._reasoning.set_linker(self._linker)
 
     async def close(self) -> None:
         """Close the Neo4j connection and stop background services."""
@@ -457,6 +483,21 @@ class MemoryClient:
         return self._reasoning
 
     @property
+    def linker(self) -> GraphLinker:
+        """
+        Access the graph linker for semantic neighborhood linking.
+
+        Returns:
+            GraphLinker instance
+
+        Raises:
+            NotConnectedError: If client is not connected
+        """
+        if self._linker is None:
+            raise NotConnectedError("Client not connected. Use 'async with' or call connect().")
+        return self._linker
+
+    @property
     def schema(self) -> SchemaManager:
         """
         Access schema manager for database schema operations.
@@ -509,6 +550,7 @@ class MemoryClient:
         include_long_term: bool = True,
         include_reasoning: bool = True,
         max_items: int = 10,
+        relevance_threshold: float | None = None,
     ) -> str:
         """
         Get combined context from all memory types for an LLM prompt.
@@ -523,6 +565,9 @@ class MemoryClient:
             include_long_term: Whether to include facts and preferences
             include_reasoning: Whether to include similar task traces
             max_items: Maximum items per memory type
+            relevance_threshold: Optional override applied uniformly to all
+                underlying searches. ``None`` (default) lets each layer resolve
+                its own per-category threshold from settings.
 
         Returns:
             Formatted context string suitable for LLM prompts
@@ -534,6 +579,7 @@ class MemoryClient:
                 query,
                 session_id=session_id,
                 max_messages=max_items,
+                relevance_threshold=relevance_threshold,
             )
             if short_term_context:
                 parts.append(f"## Conversation History\n{short_term_context}")
@@ -542,6 +588,7 @@ class MemoryClient:
             long_term_context = await self.long_term.get_context(
                 query,
                 max_items=max_items,
+                relevance_threshold=relevance_threshold,
             )
             if long_term_context:
                 parts.append(f"## Relevant Knowledge\n{long_term_context}")
@@ -550,6 +597,7 @@ class MemoryClient:
             reasoning_context = await self.reasoning.get_context(
                 query,
                 max_traces=max_items // 2,
+                relevance_threshold=relevance_threshold,
             )
             if reasoning_context:
                 parts.append(f"## Similar Past Tasks\n{reasoning_context}")

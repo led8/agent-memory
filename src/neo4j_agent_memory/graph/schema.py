@@ -79,6 +79,10 @@ class SchemaManager:
             ("trace_session_idx", "ReasoningTrace", "session_id"),
             ("trace_success_idx", "ReasoningTrace", "success"),
             ("tool_call_status_idx", "ToolCall", "status"),
+            # V2: Candidate persistence
+            ("candidate_id_idx", "LongTermCandidate", "id"),
+            ("candidate_status_idx", "LongTermCandidate", "status"),
+            ("candidate_type_idx", "LongTermCandidate", "type"),
         ]
 
         for index_name, label, property_name in indexes:

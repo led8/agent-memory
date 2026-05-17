@@ -133,28 +133,74 @@ test: test-unit
 test-unit:
 	uv run pytest tests/unit -v
 
-# Integration tests using testcontainers (auto-starts Neo4j container)
-# Requires Docker to be running
-test-integration:
+# ---------------------------------------------------------------------------
+# Backups (online APOC export)
+# ---------------------------------------------------------------------------
+# Snapshots the live Neo4j corpus to ~/.agent-memory-backups/agent-memory-*.cypher.
+# Replay with: cypher-shell -u neo4j -p "$$NEO4J_PASSWORD" < <file>
+# Retention: 30 most-recent backups (override with RETENTION=N).
+backup-agent-memory:
+	@./scripts/backup_agent_memory.sh
+
+# ---------------------------------------------------------------------------
+# CLI command tests (subprocess-driven, dedicated container on port 7688)
+# ---------------------------------------------------------------------------
+# These exercise the user-facing `agent-memory` wrapper end-to-end against an
+# isolated Neo4j container with its own volume. Safe to run alongside the live
+# prod container on 7687 — different port, different volume, different
+# password. See docs/database-safety.md.
+cli-test-up:
+	@docker compose -f docker-compose.cli-test.yml up -d
+
+cli-test-down:
+	@docker compose -f docker-compose.cli-test.yml down
+
+cli-test-logs:
+	@docker compose -f docker-compose.cli-test.yml logs -f
+
+test-cli: cli-test-up
+	@echo "Running CLI command tests against bolt://localhost:7688..."
+	RUN_INTEGRATION_TESTS=1 uv run pytest tests/cli/ -v --timeout=120
+
+
+# Auto-backup BEFORE every potentially-destructive test target. The DB the
+# integration tests target is the same `bolt://localhost:7687` the user's CLI
+# uses; a stray `MATCH (n) DETACH DELETE n` in a fixture wipes everything.
+# The sentinel guard in conftest.py is the primary defense; this is layer 2.
+test-integration: backup-agent-memory
 	@echo "Running integration tests with testcontainers..."
 	@echo "(Docker must be running - testcontainers will manage the Neo4j container)"
 	uv run pytest tests/integration -v --timeout=300
 
-# MCP-specific integration and E2E tests
-test-integration-mcp:
+test-integration-mcp: backup-agent-memory
 	@echo "Running MCP integration and E2E tests with testcontainers..."
 	uv run pytest tests/integration/test_mcp_server_integration.py tests/integration/test_mcp_e2e.py tests/integration/test_integration_layer.py -v --timeout=300
 
-# End-to-end MCP flow tests (simulates Claude Desktop usage)
-test-e2e:
-	@echo "Running end-to-end MCP flow tests with testcontainers..."
-	uv run pytest tests/integration/test_mcp_e2e.py -v --timeout=300
-
-# Run all tests using testcontainers
-test-all:
+test-all: backup-agent-memory
 	@echo "Running all tests (unit + integration + examples) with testcontainers..."
 	@echo "(Docker must be running - testcontainers will manage the Neo4j container)"
 	uv run pytest tests -v --timeout=300
+
+# Original (non-backed-up) targets, kept for explicit opt-in scenarios where
+# the caller knows they're targeting a throwaway DB and wants to skip backup.
+test-integration-raw:
+	@echo "Running integration tests with testcontainers (NO BACKUP)..."
+	uv run pytest tests/integration -v --timeout=300
+
+test-integration-mcp-raw:
+	uv run pytest tests/integration/test_mcp_server_integration.py tests/integration/test_mcp_e2e.py tests/integration/test_integration_layer.py -v --timeout=300
+
+test-all-raw:
+	uv run pytest tests -v --timeout=300
+
+# Integration tests using testcontainers (auto-starts Neo4j container)
+# Requires Docker to be running
+# (legacy stubs below replaced by sentinel-guarded versions above)
+
+# End-to-end MCP flow tests (simulates Claude Desktop usage)
+test-e2e: backup-agent-memory
+	@echo "Running end-to-end MCP flow tests with testcontainers..."
+	uv run pytest tests/integration/test_mcp_e2e.py -v --timeout=300
 
 # Run all tests with explicit docker-compose Neo4j (useful if testcontainers has issues)
 test-docker: neo4j-start neo4j-wait
