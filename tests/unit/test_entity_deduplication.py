@@ -22,8 +22,8 @@ class TestDeduplicationConfig:
         config = DeduplicationConfig()
 
         assert config.enabled is True
-        assert config.auto_merge_threshold == 0.95
-        assert config.flag_threshold == 0.85
+        assert config.auto_merge_threshold == 0.97
+        assert config.flag_threshold == 0.92
         assert config.use_fuzzy_matching is True
         assert config.fuzzy_threshold == 0.9
         assert config.max_candidates == 10
@@ -256,7 +256,7 @@ class TestLongTermMemoryDeduplication:
                             "confidence": 1.0,
                             "metadata": None,
                         },
-                        "score": 0.96,  # Above auto_merge_threshold
+                        "score": 0.98,  # Above auto_merge_threshold
                     }
                 ]
             else:
@@ -287,7 +287,7 @@ class TestLongTermMemoryDeduplication:
         assert dedup_result.is_duplicate is True
         assert dedup_result.action == "merged"
         assert dedup_result.matched_entity_id == UUID(existing_entity_id)
-        assert dedup_result.similarity_score == 0.96
+        assert dedup_result.similarity_score == 0.98
         # The returned entity should be the existing one
         assert entity.name == "John Smith"
 
@@ -310,7 +310,7 @@ class TestLongTermMemoryDeduplication:
                     "confidence": 1.0,
                     "metadata": None,
                 },
-                "score": 0.88,  # Between flag_threshold and auto_merge_threshold
+                "score": 0.94,  # Between flag_threshold and auto_merge_threshold
             }
         ]
 
@@ -322,9 +322,7 @@ class TestLongTermMemoryDeduplication:
         assert dedup_result.is_duplicate is True
         assert dedup_result.action == "flagged"
         assert dedup_result.matched_entity_id == UUID(existing_entity_id)
-        assert dedup_result.similarity_score == 0.88
-
-        # Entity should still be created
+        assert dedup_result.similarity_score == 0.94
         assert entity.name == "J. Smith"
 
         # Verify SAME_AS relationship was created
@@ -386,7 +384,7 @@ class TestLongTermMemoryDeduplication:
                     "merged_into": None,  # Active entity
                     "metadata": None,
                 },
-                "score": 0.87,  # Lower score but not merged
+                "score": 0.94,  # Lower score but not merged
             },
         ]
 
@@ -397,7 +395,7 @@ class TestLongTermMemoryDeduplication:
 
         # Should match the active entity, not the merged one
         assert dedup_result.matched_entity_id == UUID(active_entity_id)
-        assert dedup_result.action == "flagged"  # 0.87 is between thresholds
+        assert dedup_result.action == "flagged"  # 0.94 is between thresholds
 
     @pytest.mark.asyncio
     async def test_find_potential_duplicates(self, memory, mock_client):
@@ -675,7 +673,7 @@ class TestDeduplicationWithFuzzyMatching:
                     "type": "PERSON",
                     "metadata": None,
                 },
-                "score": 0.88,  # Medium embedding score
+                "score": 0.93,  # Medium embedding score
             }
         ]
 
@@ -703,7 +701,7 @@ class TestDeduplicationWithFuzzyMatching:
                     "type": "PERSON",
                     "metadata": None,
                 },
-                "score": 0.88,
+                "score": 0.93,
             }
         ]
 

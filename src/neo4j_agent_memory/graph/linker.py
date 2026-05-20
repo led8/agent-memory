@@ -44,7 +44,7 @@ class LinkerConfig:
 
     enabled: bool = True
     max_neighbors: int = 5
-    min_similarity: float = 0.75
+    min_similarity: float = 0.80
     cross_label: bool = True
     exclude_labels: list[str] = field(default_factory=list)
     link_method: str = "embedding_similarity"

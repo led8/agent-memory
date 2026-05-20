@@ -430,6 +430,7 @@ class MemoryCliService:
         confidence: float = 1.0,
         metadata: dict[str, Any] | None = None,
         generate_embedding: bool = True,
+        extract_entities: bool = False,
     ) -> dict[str, Any]:
         coding_memory = self._coding_memory(repo, task)
         created = await coding_memory.remember_fact(
@@ -440,7 +441,38 @@ class MemoryCliService:
             metadata={**(metadata or {}), "scope_kind": scope_kind},
             generate_embedding=generate_embedding,
         )
-        return {"fact": to_jsonable(created)}
+        result: dict[str, Any] = {"fact": to_jsonable(created)}
+
+        # Auto-extract entity from subject if it looks like a proper noun (≥2 tokens)
+        if extract_entities and len(subject.split()) >= 2 or (
+            extract_entities and subject[0:1].isupper() and len(subject) > 2
+        ):
+            try:
+                entity, dedup = await coding_memory.remember_entity(
+                    name=subject,
+                    entity_type="CONCEPT",
+                    description=f"{predicate}: {obj[:120]}",
+                    metadata={"scope_kind": scope_kind, "source": "fact_extraction"},
+                    resolve=True,
+                    deduplicate=True,
+                )
+                # Link entity to fact via MENTIONS
+                fact_id = created.get("id") if isinstance(created, dict) else getattr(created, "id", None)
+                entity_id = entity.get("id") if isinstance(entity, dict) else getattr(entity, "id", None)
+                if fact_id and entity_id:
+                    await self.client.graph.execute_write(
+                        "MATCH (f:Fact {id: $fact_id}) "
+                        "MATCH (e:Entity {id: $entity_id}) "
+                        "MERGE (f)-[:MENTIONS]->(e)",
+                        {"fact_id": str(fact_id), "entity_id": str(entity_id)},
+                    )
+                result["entity"] = to_jsonable(entity)
+                result["deduplication"] = to_jsonable(dedup)
+            except Exception:
+                # Entity extraction is best-effort
+                pass
+
+        return result
 
     async def _inspect_raw(self, label: str, entry_id: str) -> dict[str, Any] | None:
         node = await self.client.graph.get_node_by_id(label, entry_id)

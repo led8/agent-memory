@@ -42,8 +42,8 @@ class DeduplicationConfig:
     """
 
     enabled: bool = True
-    auto_merge_threshold: float = 0.95
-    flag_threshold: float = 0.85
+    auto_merge_threshold: float = 0.97
+    flag_threshold: float = 0.92
     use_fuzzy_matching: bool = True
     fuzzy_threshold: float = 0.9
     max_candidates: int = 10

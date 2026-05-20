@@ -118,6 +118,7 @@ def test_memory_add_fact_dispatches_to_service(monkeypatch) -> None:
             "confidence": 1.0,
             "metadata": None,
             "generate_embedding": True,
+            "extract_entities": False,
         },
     )
 

@@ -533,7 +533,7 @@ class LinkerConfig(BaseModel):
         default=5, ge=1, le=20, description="Maximum edges to create per node"
     )
     min_similarity: float = Field(
-        default=0.75, ge=0.0, le=1.0, description="Minimum cosine similarity to create an edge"
+        default=0.80, ge=0.0, le=1.0, description="Minimum cosine similarity to create an edge"
     )
     cross_label: bool = Field(
         default=True, description="Search across all node types, not just same-label"

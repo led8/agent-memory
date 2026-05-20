@@ -1185,6 +1185,7 @@ def memory_add_preference(
 @click.option("--confidence", type=float, default=1.0, help="Stored confidence score.")
 @click.option("--metadata-json", default=None, help="Optional JSON metadata.")
 @click.option("--generate-embedding/--no-generate-embedding", default=True, help="Generate embedding.")
+@click.option("--extract-entities/--no-extract-entities", default=False, help="Auto-extract entity from subject.")
 @click.pass_obj
 def memory_add_fact(
     connection: MemoryCliConnection,
@@ -1197,6 +1198,7 @@ def memory_add_fact(
     confidence: float,
     metadata_json: str | None,
     generate_embedding: bool,
+    extract_entities: bool,
 ):
     """Add or reuse one durable fact."""
     metadata = parse_json_option(metadata_json, "--metadata-json")
@@ -1212,6 +1214,7 @@ def memory_add_fact(
             confidence=confidence,
             metadata=metadata,
             generate_embedding=generate_embedding,
+            extract_entities=extract_entities,
         ),
     )
     echo_json(payload)

@@ -44,7 +44,7 @@ class TestLinkerConfig:
         cfg = LinkerConfig()
         assert cfg.enabled is True
         assert cfg.max_neighbors == 5
-        assert cfg.min_similarity == 0.75
+        assert cfg.min_similarity == 0.80
         assert cfg.cross_label is True
         assert cfg.exclude_labels == []
         assert cfg.link_method == "embedding_similarity"
